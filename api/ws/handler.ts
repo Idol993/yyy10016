@@ -24,7 +24,8 @@ import {
   runEntryFile,
   killRunningSandbox,
   getRunningInstance,
-  sendToProcess,
+  writeToRunningInstance,
+  RUNTIME_INFO,
   type ExecContext,
   type ExecCallbacks,
 } from '../services/executor.js';
@@ -163,8 +164,8 @@ export function setupWebSocket(server: Server): void {
       type: 'output',
       payload: {
         stream: 'system',
-        data: `[SandboxOS] Connected. Permission: ${permission}. ` +
-          (runningInstance ? `Active instance: ${runningInstance.instanceId}` : `Sandbox ready. Click Run to start isolated instance.`) + '\n',
+        data: `[SandboxOS] Connected. Runtime: ${RUNTIME_INFO.type} v${RUNTIME_INFO.version}. Permission: ${permission}. ` +
+          (runningInstance ? `Active instance: ${runningInstance.id}` : `Sandbox ready. Click Run to start isolated instance.`) + '\n',
         timestamp: Date.now(),
       },
     }));
@@ -185,14 +186,24 @@ export function setupWebSocket(server: Server): void {
             }
             const callbacks = createCallbacks(room);
             const existing = getRunningInstance(sandboxId);
-            if (existing && existing.proc && !existing.proc.killed) {
+            if (existing && existing.status === 'running') {
               callbacks.onOutput('system', '[SandboxOS] Stopping previous isolated instance...\n');
               killRunningSandbox(sandboxId);
-            }
-            callbacks.onOutput('system', '[SandboxOS] Launching isolated instance...\n');
-            const result = runEntryFile(execCtx, callbacks);
-            if (result.error) {
-              callbacks.onOutput('stderr', `[SandboxOS] ${result.error}\n`);
+              setTimeout(async () => {
+                callbacks.onOutput('system', '[SandboxOS] Launching isolated instance...\n');
+                const result = await runEntryFile(execCtx, callbacks);
+                if (result.error) {
+                  callbacks.onOutput('stderr', `[SandboxOS] ${result.error}\n`);
+                }
+              }, 500);
+            } else {
+              callbacks.onOutput('system', '[SandboxOS] Launching isolated instance...\n');
+              (async () => {
+                const result = await runEntryFile(execCtx, callbacks);
+                if (result.error) {
+                  callbacks.onOutput('stderr', `[SandboxOS] ${result.error}\n`);
+                }
+              })();
             }
             break;
           }
@@ -212,9 +223,12 @@ export function setupWebSocket(server: Server): void {
               break;
             }
             const inputData = message.payload.data as string;
-            const inst = getRunningInstance(sandboxId);
-            if (inst?.proc) {
-              sendToProcess(inst.proc, inputData);
+            const ok = writeToRunningInstance(sandboxId, inputData);
+            if (!ok) {
+              ws.send(JSON.stringify({
+                type: 'output',
+                payload: { stream: 'stderr', data: '[SandboxOS] No running instance to receive input\n', timestamp: Date.now() },
+              }));
             }
             break;
           }

@@ -4,7 +4,7 @@
       "id": 1,
       "email": "demo@sandboxos.io",
       "username": "demo",
-      "password_hash": "$2a$10$HZln.ymzmTocO5/CkJWATuZCE2PquxUSG7VrO.JFG6PfG/tcPsBpi",
+      "password_hash": "$2a$10$PJsSdq6xrxssP88YIt9ow.ypHeld76MKwLyjqmBxIlpeO9oRXyM4O",
       "role": "user",
       "storage_limit_mb": 500,
       "sandbox_limit": 3,
@@ -19,6 +19,16 @@
       "storage_limit_mb": 500,
       "sandbox_limit": 3,
       "created_at": "2026-06-20T01:49:07.461Z"
+    },
+    {
+      "id": 3,
+      "email": "test@a.com",
+      "username": "test",
+      "password_hash": "$2a$10$tT/0S9.0eB6zpmpZxotnEu8FHzIDBjx4DlrBaw5e6WLqtlddnSOrO",
+      "role": "user",
+      "storage_limit_mb": 500,
+      "sandbox_limit": 3,
+      "created_at": "2026-06-20T02:17:48.757Z"
     }
   ],
   "sandboxes": [
@@ -48,7 +58,7 @@
   ],
   "collaborations": [],
   "_counters": {
-    "users": 2,
+    "users": 3,
     "sandboxes": 1,
     "file_nodes": 0,
     "snapshots": 1,

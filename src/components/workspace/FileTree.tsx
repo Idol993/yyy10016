@@ -1,5 +1,5 @@
 import { useState, useMemo } from 'react'
-import { File, Folder, FolderOpen, Plus, Trash2, RefreshCw, ChevronRight, ChevronDown } from 'lucide-react'
+import { File, Folder, FolderOpen, Plus, Trash2, RefreshCw, ChevronRight, ChevronDown, Pencil } from 'lucide-react'
 import { useFileStore } from '@/stores/files'
 import { useSandboxStore } from '@/stores/sandbox'
 import { useSandbox } from '@/contexts/SandboxContext'
@@ -87,15 +87,21 @@ interface TreeItemProps {
   toggleDir: (path: string) => void
   onFileClick: (file: FileNode) => void
   onDelete: (path: string) => void
+  onRename: (oldPath: string, newPath: string) => Promise<boolean>
   currentPath: string | null
   isReadOnly: boolean
+  renamingPath: string | null
+  setRenamingPath: (p: string | null) => void
 }
 
-function TreeItem({ node, depth, expandedDirs, toggleDir, onFileClick, onDelete, currentPath, isReadOnly }: TreeItemProps) {
+function TreeItem({ node, depth, expandedDirs, toggleDir, onFileClick, onDelete, onRename, currentPath, isReadOnly, renamingPath, setRenamingPath }: TreeItemProps) {
   const isExpanded = expandedDirs.has(node.path)
   const isActive = currentPath === node.path && node.type === 'file'
+  const isRenaming = renamingPath === node.path
+  const [renameValue, setRenameValue] = useState(node.name)
 
   const handleClick = () => {
+    if (isRenaming) return
     if (node.type === 'directory') {
       toggleDir(node.path)
     } else if (node.node) {
@@ -106,6 +112,27 @@ function TreeItem({ node, depth, expandedDirs, toggleDir, onFileClick, onDelete,
   const handleDelete = (e: React.MouseEvent) => {
     e.stopPropagation()
     if (!isReadOnly) onDelete(node.path)
+  }
+
+  const handleRenameClick = (e: React.MouseEvent) => {
+    e.stopPropagation()
+    setRenameValue(node.name)
+    setRenamingPath(node.path)
+  }
+
+  const handleRenameSubmit = async () => {
+    const trimmed = renameValue.trim()
+    if (!trimmed || trimmed === node.name) {
+      setRenamingPath(null)
+      return
+    }
+    const parentPath = node.path.substring(0, node.path.lastIndexOf('/')) || '/'
+    const newPath = parentPath === '/' ? `/${trimmed}` : `${parentPath}/${trimmed}`
+    const ok = await onRename(node.path, newPath)
+    if (!ok) {
+      setRenameValue(node.name)
+    }
+    setRenamingPath(null)
   }
 
   return (
@@ -134,15 +161,41 @@ function TreeItem({ node, depth, expandedDirs, toggleDir, onFileClick, onDelete,
         ) : (
           <File size={16} className="shrink-0" style={{ color: getFileColor(node.name) }} />
         )}
-        <span className="truncate flex-1">{node.name}</span>
-        {!isReadOnly && (
-          <button
-            onClick={handleDelete}
-            className="p-0.5 rounded opacity-0 group-hover:opacity-100 hover:bg-[#30363D] text-[#8B949E] hover:text-[#F85149] transition-all"
-            title="Delete"
-          >
-            <Trash2 size={12} />
-          </button>
+        {isRenaming ? (
+          <input
+            autoFocus
+            type="text"
+            value={renameValue}
+            onChange={(e) => setRenameValue(e.target.value)}
+            onKeyDown={(e) => {
+              e.stopPropagation()
+              if (e.key === 'Enter') handleRenameSubmit()
+              if (e.key === 'Escape') setRenamingPath(null)
+            }}
+            onClick={(e) => e.stopPropagation()}
+            onBlur={handleRenameSubmit}
+            className="flex-1 px-1 py-0.5 text-sm bg-[#0D1117] border border-[#58A6FF] rounded text-[#E6EDF3] outline-none min-w-0"
+          />
+        ) : (
+          <span className="truncate flex-1">{node.name}</span>
+        )}
+        {!isReadOnly && !isRenaming && (
+          <>
+            <button
+              onClick={handleRenameClick}
+              className="p-0.5 rounded opacity-0 group-hover:opacity-100 hover:bg-[#30363D] text-[#8B949E] hover:text-[#58A6FF] transition-all"
+              title="Rename"
+            >
+              <Pencil size={12} />
+            </button>
+            <button
+              onClick={handleDelete}
+              className="p-0.5 rounded opacity-0 group-hover:opacity-100 hover:bg-[#30363D] text-[#8B949E] hover:text-[#F85149] transition-all"
+              title="Delete"
+            >
+              <Trash2 size={12} />
+            </button>
+          </>
         )}
       </div>
       {node.type === 'directory' && isExpanded && node.children && (
@@ -160,8 +213,11 @@ function TreeItem({ node, depth, expandedDirs, toggleDir, onFileClick, onDelete,
               toggleDir={toggleDir}
               onFileClick={onFileClick}
               onDelete={onDelete}
+              onRename={onRename}
               currentPath={currentPath}
               isReadOnly={isReadOnly}
+              renamingPath={renamingPath}
+              setRenamingPath={setRenamingPath}
             />
           ))}
         </div>
@@ -171,7 +227,7 @@ function TreeItem({ node, depth, expandedDirs, toggleDir, onFileClick, onDelete,
 }
 
 export default function FileTree() {
-  const { files, currentFile, fetchFiles, addOpenFile, setCurrentFile, createFile, deleteFile } = useFileStore()
+  const { files, currentFile, fetchFiles, addOpenFile, setCurrentFile, createFile, deleteFile, renameFile } = useFileStore()
   const { currentSandbox } = useSandboxStore()
   const { permission } = useSandbox()
   const isReadOnly = permission === 'read'
@@ -179,6 +235,7 @@ export default function FileTree() {
   const [showNewFile, setShowNewFile] = useState(false)
   const [showNewDir, setShowNewDir] = useState(false)
   const [newName, setNewName] = useState('')
+  const [renamingPath, setRenamingPath] = useState<string | null>(null)
 
   const tree = useMemo(() => buildTree(files), [files])
 
@@ -228,6 +285,11 @@ export default function FileTree() {
   const handleDelete = async (path: string) => {
     if (!currentSandbox || isReadOnly) return
     await deleteFile(currentSandbox.id, path)
+  }
+
+  const handleRename = async (oldPath: string, newPath: string): Promise<boolean> => {
+    if (!currentSandbox || isReadOnly) return false
+    return await renameFile(currentSandbox.id, oldPath, newPath)
   }
 
   return (
@@ -307,8 +369,11 @@ export default function FileTree() {
             toggleDir={toggleDir}
             onFileClick={handleFileClick}
             onDelete={handleDelete}
+            onRename={handleRename}
             currentPath={currentFile?.path || null}
             isReadOnly={isReadOnly}
+            renamingPath={renamingPath}
+            setRenamingPath={setRenamingPath}
           />
         ))}
       </div>

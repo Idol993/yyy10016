@@ -13,9 +13,10 @@ interface FileState {
   saveFile: (sandboxId: number, path: string, content: string) => Promise<void>
   createFile: (sandboxId: number, path: string, name: string, type: 'file' | 'directory') => Promise<void>
   deleteFile: (sandboxId: number, path: string) => Promise<void>
+  renameFile: (sandboxId: number, oldPath: string, newPath: string) => Promise<boolean>
   createSnapshot: (sandboxId: number, label: string) => Promise<void>
   fetchSnapshots: (sandboxId: number) => Promise<void>
-  rollbackSnapshot: (sandboxId: number, snapshotId: number) => Promise<void>
+  rollbackSnapshot: (sandboxId: number, snapshotId: number) => Promise<boolean>
   setCurrentFile: (file: FileNode | null) => void
   addOpenFile: (file: FileNode) => void
   removeOpenFile: (path: string) => void
@@ -60,11 +61,33 @@ export const useFileStore = create<FileState>()((set, get) => ({
     const query = `?path=${encodeURIComponent(path)}`
     const response = await apiDelete<ApiResponse>(`/sandboxes/${sandboxId}/files${query}`)
     if (response.success) {
+      await get().fetchFiles(sandboxId)
       set((state) => ({
-        files: state.files.filter((f) => f.path !== path),
         currentFile: state.currentFile?.path === path ? null : state.currentFile,
         openFiles: state.openFiles.filter((f) => f.path !== path),
       }))
+    }
+  },
+
+  renameFile: async (sandboxId: number, oldPath: string, newPath: string): Promise<boolean> => {
+    try {
+      const response = await apiPost<ApiResponse>(`/sandboxes/${sandboxId}/files/rename`, { oldPath, newPath })
+      if (response.success) {
+        await get().fetchFiles(sandboxId)
+        set((state) => {
+          const openFiles = state.openFiles.map((f) =>
+            f.path === oldPath ? { ...f, path: newPath, name: newPath.split('/').pop() || f.name } : f
+          )
+          const currentFile = state.currentFile?.path === oldPath
+            ? { ...state.currentFile, path: newPath, name: newPath.split('/').pop() || state.currentFile.name }
+            : state.currentFile
+          return { openFiles, currentFile }
+        })
+        return true
+      }
+      return false
+    } catch {
+      return false
     }
   },
 
@@ -78,11 +101,19 @@ export const useFileStore = create<FileState>()((set, get) => ({
     set({ snapshots: response.snapshots })
   },
 
-  rollbackSnapshot: async (sandboxId: number, snapshotId: number) => {
-    await apiPost<ApiResponse>(`/sandboxes/${sandboxId}/files/snapshots/${snapshotId}/rollback`)
-    await get().fetchFiles(sandboxId)
-    if (get().currentFile) {
-      await get().fetchFileContent(sandboxId, get().currentFile!.path)
+  rollbackSnapshot: async (sandboxId: number, snapshotId: number): Promise<boolean> => {
+    try {
+      const response = await apiPost<ApiResponse>(`/sandboxes/${sandboxId}/files/snapshots/${snapshotId}/rollback`)
+      if (response.success) {
+        await get().fetchFiles(sandboxId)
+        if (get().currentFile) {
+          await get().fetchFileContent(sandboxId, get().currentFile!.path)
+        }
+        return true
+      }
+      return false
+    } catch {
+      return false
     }
   },
 

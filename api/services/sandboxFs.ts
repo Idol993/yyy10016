@@ -207,13 +207,69 @@ export function createSnapshotFs(sandboxId: number, snapshotId: number): boolean
   }
 }
 
-export function rollbackFromSnapshotFs(sandboxId: number, snapshotId: number): boolean {
+export function validateSnapshotDir(snapshotId: number): boolean {
   try {
     const src = getSnapshotDir(snapshotId);
     if (!fs.existsSync(src)) return false;
+    const stat = fs.statSync(src);
+    if (!stat.isDirectory()) return false;
+    const entries = fs.readdirSync(src);
+    if (entries.length === 0) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function rollbackFromSnapshotFs(sandboxId: number, snapshotId: number): boolean {
+  try {
+    const src = getSnapshotDir(snapshotId);
+    if (!fs.existsSync(src)) {
+      return false;
+    }
+
+    if (!validateSnapshotDir(snapshotId)) {
+      return false;
+    }
+
     const dest = getSandboxFsPath(sandboxId);
-    removeDir(dest);
-    copyDir(src, dest);
+    const backup = dest + '.rollback_backup_' + Date.now();
+
+    try {
+      if (fs.existsSync(dest)) {
+        copyDir(dest, backup);
+      }
+    } catch {
+      return false;
+    }
+
+    try {
+      removeDir(dest);
+    } catch {
+      if (fs.existsSync(backup)) {
+        try { removeDir(backup); } catch { /* ignore */ }
+      }
+      return false;
+    }
+
+    try {
+      copyDir(src, dest);
+    } catch {
+      if (fs.existsSync(backup)) {
+        try {
+          removeDir(dest);
+          copyDir(backup, dest);
+        } catch { /* ignore */ }
+      }
+      if (fs.existsSync(backup)) {
+        try { removeDir(backup); } catch { /* ignore */ }
+      }
+      return false;
+    }
+
+    if (fs.existsSync(backup)) {
+      try { removeDir(backup); } catch { /* ignore */ }
+    }
     return true;
   } catch {
     return false;

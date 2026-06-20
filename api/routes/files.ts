@@ -12,6 +12,7 @@ import {
   createSnapshotFs,
   rollbackFromSnapshotFs,
   deleteSnapshotFs,
+  validateSnapshotDir,
   type FsEntry,
 } from '../services/sandboxFs.js';
 import { Snapshots } from '../db/store.js';
@@ -228,9 +229,16 @@ router.post('/snapshots/:sid/rollback', authMiddleware, (req: AuthenticatedReque
     return;
   }
 
+  if (!validateSnapshotDir(snapshotId)) {
+    deleteSnapshotFs(snapshotId);
+    Snapshots.delete(snapshotId);
+    res.status(410).json({ success: false, error: 'Snapshot files are missing or corrupted. Snapshot removed.' });
+    return;
+  }
+
   const ok = rollbackFromSnapshotFs(sandboxId, snapshotId);
   if (!ok) {
-    res.status(500).json({ success: false, error: 'Failed to rollback to snapshot' });
+    res.status(500).json({ success: false, error: 'Failed to rollback to snapshot. Current files preserved.' });
     return;
   }
 
@@ -258,9 +266,18 @@ router.get('/snapshots', authMiddleware, (req: AuthenticatedRequest, res: Respon
   if (!access) return;
 
   const { sandboxId } = access;
-  const snapshots = Snapshots.findBySandboxId(sandboxId);
+  const allSnapshots = Snapshots.findBySandboxId(sandboxId);
 
-  res.json({ success: true, snapshots });
+  const validSnapshots = allSnapshots.filter((s) => {
+    const ok = validateSnapshotDir(s.id);
+    if (!ok) {
+      deleteSnapshotFs(s.id);
+      Snapshots.delete(s.id);
+    }
+    return ok;
+  });
+
+  res.json({ success: true, snapshots: validSnapshots });
 });
 
 export default router;

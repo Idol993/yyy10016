@@ -19,24 +19,17 @@ import {
   getRoomUsers,
   type CollabUser,
 } from '../services/collab.js';
-import { setActiveProcess, startSandbox } from '../services/sandbox.js';
+import { startSandbox, stopSandbox } from '../services/sandbox.js';
 import {
-  executeInSandbox,
   runEntryFile,
-  runCustomCommand,
+  killRunningSandbox,
+  getRunningInstance,
   sendToProcess,
   type ExecContext,
   type ExecCallbacks,
 } from '../services/executor.js';
-import type { ChildProcess } from 'child_process';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'sandboxos-dev-secret';
-
-interface SandboxProcesses {
-  process: ChildProcess | null;
-}
-
-const sandboxProcesses = new Map<number, SandboxProcesses>();
 
 function verifyWsToken(token: string): JwtPayload | null {
   try {
@@ -44,13 +37,6 @@ function verifyWsToken(token: string): JwtPayload | null {
   } catch {
     return null;
   }
-}
-
-function getSandboxProcess(sandboxId: number): SandboxProcesses {
-  if (!sandboxProcesses.has(sandboxId)) {
-    sandboxProcesses.set(sandboxId, { process: null });
-  }
-  return sandboxProcesses.get(sandboxId)!;
 }
 
 function sendToAll(room: ReturnType<typeof getCollabRoom>, msg: unknown): void {
@@ -62,12 +48,21 @@ function sendToAll(room: ReturnType<typeof getCollabRoom>, msg: unknown): void {
 }
 
 function buildExecContext(
-  sandboxId: number,
+  sandbox: { id: number; language: string; cpu_limit_percent: number; memory_limit_mb: number; disk_limit_mb: number },
   userId: number,
   username: string,
   permission: 'read' | 'edit' | 'owner'
 ): ExecContext {
-  return { sandboxId, userId, username, permission };
+  return {
+    sandboxId: sandbox.id,
+    userId,
+    username,
+    permission,
+    language: sandbox.language,
+    cpuLimitPercent: sandbox.cpu_limit_percent,
+    memoryLimitMb: sandbox.memory_limit_mb,
+    diskLimitMb: sandbox.disk_limit_mb,
+  };
 }
 
 function createCallbacks(room: ReturnType<typeof getCollabRoom>): ExecCallbacks {
@@ -79,10 +74,11 @@ function createCallbacks(room: ReturnType<typeof getCollabRoom>): ExecCallbacks 
       };
       sendToAll(room, msg);
     },
-    onExit: (code) => {
+    onExit: (code, reason) => {
+      const reasonText = reason ? ` (reason: ${reason})` : '';
       const msg = {
         type: 'output',
-        payload: { stream: 'system' as const, data: `\n[SandboxOS] Process exited with code ${code}\n`, timestamp: Date.now() },
+        payload: { stream: 'system' as const, data: `\n[SandboxOS] Instance exited with code ${code}${reasonText}\n`, timestamp: Date.now() },
       };
       sendToAll(room, msg);
     },
@@ -144,8 +140,7 @@ export function setupWebSocket(server: Server): void {
 
     const room = getCollabRoom(sandboxId);
     const user: CollabUser = addClientToRoom(sandboxId, ws, payload.userId, permission);
-    const procInfo = getSandboxProcess(sandboxId);
-    const execCtx = buildExecContext(sandboxId, payload.userId, payload.email || 'user', permission);
+    const execCtx = buildExecContext(sandbox, payload.userId, payload.email || 'user', permission);
 
     const chatHistory = getChatHistory(room);
     if (chatHistory.length > 0) {
@@ -162,11 +157,14 @@ export function setupWebSocket(server: Server): void {
 
     broadcastUserJoin(room, user);
 
+    const runningInstance = getRunningInstance(sandboxId);
+
     ws.send(JSON.stringify({
       type: 'output',
       payload: {
         stream: 'system',
-        data: `[SandboxOS] Connected. Your permission: ${permission}. Isolated environment ready.\n`,
+        data: `[SandboxOS] Connected. Permission: ${permission}. ` +
+          (runningInstance ? `Active instance: ${runningInstance.instanceId}` : `Sandbox ready. Click Run to start isolated instance.`) + '\n',
         timestamp: Date.now(),
       },
     }));
@@ -176,37 +174,7 @@ export function setupWebSocket(server: Server): void {
         const message = JSON.parse(data.toString()) as { type: string; payload: Record<string, unknown> };
 
         switch (message.type) {
-          case 'execute': {
-            if (permission === 'read') {
-              ws.send(JSON.stringify({
-                type: 'output',
-                payload: { stream: 'stderr', data: '[SandboxOS] Read-only members cannot execute commands\n', timestamp: Date.now() },
-              }));
-              break;
-            }
-            const command = message.payload.command as string;
-            const args = (message.payload.args as string[]) || [];
-            const callbacks = createCallbacks(room);
-
-            if (command === '__run_entry__') {
-              const result = runEntryFile(execCtx, sandbox.language, callbacks);
-              if (result.error) {
-                callbacks.onOutput('stderr', `[SandboxOS] ${result.error}\n`);
-              } else if (result.process) {
-                procInfo.process = result.process;
-                setActiveProcess(sandboxId, result.process);
-              }
-            } else if (command) {
-              const result = runCustomCommand(execCtx, command, args, callbacks);
-              if (result.error) {
-                callbacks.onOutput('stderr', `[SandboxOS] ${result.error}\n`);
-              } else if (result.process) {
-                procInfo.process = result.process;
-                setActiveProcess(sandboxId, result.process);
-              }
-            }
-            break;
-          }
+          case 'execute':
           case 'run': {
             if (permission === 'read') {
               ws.send(JSON.stringify({
@@ -216,13 +184,23 @@ export function setupWebSocket(server: Server): void {
               break;
             }
             const callbacks = createCallbacks(room);
-            const result = runEntryFile(execCtx, sandbox.language, callbacks);
+            const existing = getRunningInstance(sandboxId);
+            if (existing && existing.proc && !existing.proc.killed) {
+              callbacks.onOutput('system', '[SandboxOS] Stopping previous isolated instance...\n');
+              killRunningSandbox(sandboxId);
+            }
+            callbacks.onOutput('system', '[SandboxOS] Launching isolated instance...\n');
+            const result = runEntryFile(execCtx, callbacks);
             if (result.error) {
               callbacks.onOutput('stderr', `[SandboxOS] ${result.error}\n`);
-            } else if (result.process) {
-              procInfo.process = result.process;
-              setActiveProcess(sandboxId, result.process);
             }
+            break;
+          }
+          case 'stop': {
+            if (permission === 'read') break;
+            const ok = killRunningSandbox(sandboxId);
+            const callbacks = createCallbacks(room);
+            callbacks.onOutput('system', ok ? '[SandboxOS] Isolated instance stopped by user.\n' : '[SandboxOS] No running instance.\n');
             break;
           }
           case 'input': {
@@ -234,15 +212,16 @@ export function setupWebSocket(server: Server): void {
               break;
             }
             const inputData = message.payload.data as string;
-            sendToProcess(procInfo.process, inputData);
+            const inst = getRunningInstance(sandboxId);
+            if (inst?.proc) {
+              sendToProcess(inst.proc, inputData);
+            }
             break;
           }
           case 'resize':
             break;
           case 'collab_edit': {
-            if (permission === 'read') {
-              break;
-            }
+            if (permission === 'read') break;
             const update = message.payload.update as number[];
             if (update) {
               const updateUint8 = new Uint8Array(update);
@@ -251,9 +230,7 @@ export function setupWebSocket(server: Server): void {
             break;
           }
           case 'cursor': {
-            if (permission === 'read') {
-              break;
-            }
+            if (permission === 'read') break;
             handleCursor(room, message.payload, payload.userId, ws);
             break;
           }
@@ -272,12 +249,11 @@ export function setupWebSocket(server: Server): void {
       broadcastUserLeave(room, payload.userId);
       removeClientFromRoom(sandboxId, ws);
 
-      const procInfoCached = sandboxProcesses.get(sandboxId);
-      if (room.clients.size === 0 && procInfoCached?.process) {
+      if (room.clients.size === 0) {
         try {
-          procInfoCached.process.kill();
+          killRunningSandbox(sandboxId);
         } catch { /* ignore */ }
-        procInfoCached.process = null;
+        stopSandbox(sandboxId).catch(() => { /* ignore */ });
       }
 
       const usersAfter = getRoomUsers(sandboxId);

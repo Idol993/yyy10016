@@ -5,7 +5,8 @@ import { LANGUAGES } from '@/utils/languages'
 
 export default function SandboxControls() {
   const { currentSandbox, startSandbox, stopSandbox, metrics } = useSandboxStore()
-  const { sendExecute, isConnected } = useSandbox()
+  const { sendRun, isConnected, permission } = useSandbox()
+  const isReadOnly = permission === 'read'
 
   const statusConfig = {
     running: { color: 'bg-[#3FB950]', label: 'Running', pulse: true },
@@ -39,9 +40,8 @@ export default function SandboxControls() {
   }
 
   const handleRun = () => {
-    if (currentSandbox && isConnected) {
-      const runCommand = LANGUAGES[currentSandbox.language].runCommand
-      sendExecute(runCommand)
+    if (currentSandbox && isConnected && !isReadOnly) {
+      sendRun()
     }
   }
 
@@ -77,7 +77,7 @@ export default function SandboxControls() {
       <div className="flex items-center gap-2">
         <button
           onClick={handleStart}
-          disabled={status === 'running' || status === 'starting'}
+          disabled={status === 'running' || status === 'starting' || isReadOnly}
           className="flex items-center justify-center w-9 h-9 rounded-md border border-[#30363D] bg-[#21262D] text-[#E6EDF3] hover:bg-[#30363D] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
           title="Start"
         >
@@ -85,7 +85,7 @@ export default function SandboxControls() {
         </button>
         <button
           onClick={handleStop}
-          disabled={status === 'stopped' || status === 'stopping'}
+          disabled={status === 'stopped' || status === 'stopping' || isReadOnly}
           className="flex items-center justify-center w-9 h-9 rounded-md border border-[#30363D] bg-[#21262D] text-[#E6EDF3] hover:bg-[#30363D] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
           title="Stop"
         >
@@ -93,7 +93,8 @@ export default function SandboxControls() {
         </button>
         <button
           onClick={handleRestart}
-          className="flex items-center justify-center w-9 h-9 rounded-md border border-[#30363D] bg-[#21262D] text-[#E6EDF3] hover:bg-[#30363D] transition-colors"
+          disabled={isReadOnly}
+          className="flex items-center justify-center w-9 h-9 rounded-md border border-[#30363D] bg-[#21262D] text-[#E6EDF3] hover:bg-[#30363D] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
           title="Restart"
         >
           <RotateCw size={16} />
@@ -101,9 +102,15 @@ export default function SandboxControls() {
 
         <div className="flex-1" />
 
+        {isReadOnly && (
+          <span className="text-xs text-[#F85149] font-medium px-2 py-1 bg-[#21262D] rounded-md border border-[#F85149]/30">
+            Read-Only
+          </span>
+        )}
+
         <button
           onClick={handleRun}
-          disabled={!isConnected || status !== 'running'}
+          disabled={!isConnected || status !== 'running' || isReadOnly}
           className="flex items-center gap-2 px-4 py-2 bg-[#3FB950] hover:bg-[#2EA043] text-white font-medium rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed glow-green"
         >
           <Play size={16} fill="currentColor" />

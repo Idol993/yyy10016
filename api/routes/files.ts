@@ -1,48 +1,54 @@
 import { Router, type Response } from 'express';
-import { Sandboxes, FileNodes, Collaborations } from '../db/store.js';
 import { authMiddleware, type AuthenticatedRequest } from '../middleware/auth.js';
-import { createSnapshot, rollbackToSnapshot, listSnapshots } from '../services/vfs.js';
+import { checkSandboxAccess, requireEditPermission } from '../middleware/permissions.js';
+import {
+  listDir,
+  listAllFs,
+  readFileFromFs,
+  writeFileToFs,
+  createFileFs,
+  deleteFromFs,
+  renameInFs,
+  createSnapshotFs,
+  rollbackFromSnapshotFs,
+  deleteSnapshotFs,
+  type FsEntry,
+} from '../services/sandboxFs.js';
+import { Snapshots } from '../db/store.js';
 
 const router = Router({ mergeParams: true });
 
-function verifySandboxAccess(req: AuthenticatedRequest, res: Response): boolean {
-  const sandboxId = Number(req.params.id);
-  const sandbox = Sandboxes.findById(sandboxId);
-  if (!sandbox) {
-    res.status(404).json({ success: false, error: 'Sandbox not found' });
-    return false;
-  }
-
-  if (sandbox.user_id === req.user!.userId) return true;
-
-  const collab = Collaborations.findBySandboxIdAndUserId(sandboxId, req.user!.userId);
-  if (collab) return true;
-
-  res.status(403).json({ success: false, error: 'No access to this sandbox' });
-  return false;
+function fsEntryToNode(sandboxId: number, entry: FsEntry) {
+  return {
+    id: 0,
+    sandbox_id: sandboxId,
+    path: entry.path,
+    name: entry.name,
+    type: entry.type,
+    content: null,
+    modified_at: entry.modified_at,
+  };
 }
 
 router.get('/', authMiddleware, (req: AuthenticatedRequest, res: Response): void => {
-  if (!verifySandboxAccess(req, res)) return;
+  const access = checkSandboxAccess(req, res);
+  if (!access) return;
 
-  const sandboxId = Number(req.params.id);
+  const { sandboxId } = access;
   const queryPath = (req.query.path as string) || '/';
   const getAll = req.query.all === 'true';
 
-  let files;
-  if (getAll) {
-    files = FileNodes.findBySandboxId(sandboxId);
-  } else {
-    files = FileNodes.findBySandboxIdAndParent(sandboxId, queryPath);
-  }
+  const entries = getAll ? listAllFs(sandboxId) : listDir(sandboxId, queryPath);
+  const files = entries.map((e) => fsEntryToNode(sandboxId, e));
 
   res.json({ success: true, files });
 });
 
 router.get('/content', authMiddleware, (req: AuthenticatedRequest, res: Response): void => {
-  if (!verifySandboxAccess(req, res)) return;
+  const access = checkSandboxAccess(req, res);
+  if (!access) return;
 
-  const sandboxId = Number(req.params.id);
+  const { sandboxId } = access;
   const filePath = req.query.path as string;
 
   if (!filePath) {
@@ -50,24 +56,28 @@ router.get('/content', authMiddleware, (req: AuthenticatedRequest, res: Response
     return;
   }
 
-  const node = FileNodes.findBySandboxIdAndPath(sandboxId, filePath);
-  if (!node) {
+  const content = readFileFromFs(sandboxId, filePath);
+  if (content === null) {
     res.status(404).json({ success: false, error: 'File not found' });
     return;
   }
 
-  if (node.type === 'directory') {
+  const allEntries = listAllFs(sandboxId);
+  const entry = allEntries.find((e) => e.path === filePath);
+  if (!entry || entry.type !== 'file') {
     res.status(400).json({ success: false, error: 'Cannot read content of a directory' });
     return;
   }
 
-  res.json({ success: true, content: node.content, node });
+  res.json({ success: true, content, node: fsEntryToNode(sandboxId, entry) });
 });
 
 router.put('/content', authMiddleware, (req: AuthenticatedRequest, res: Response): void => {
-  if (!verifySandboxAccess(req, res)) return;
+  const access = checkSandboxAccess(req, res);
+  if (!access) return;
+  if (!requireEditPermission(access, res)) return;
 
-  const sandboxId = Number(req.params.id);
+  const { sandboxId } = access;
   const { path: filePath, content } = req.body;
 
   if (!filePath || content === undefined) {
@@ -75,20 +85,25 @@ router.put('/content', authMiddleware, (req: AuthenticatedRequest, res: Response
     return;
   }
 
-  const node = FileNodes.findBySandboxIdAndPath(sandboxId, filePath);
-  if (!node) {
-    res.status(404).json({ success: false, error: 'File not found' });
+  const ok = writeFileToFs(sandboxId, filePath, content);
+  if (!ok) {
+    res.status(500).json({ success: false, error: 'Failed to write file' });
     return;
   }
 
-  const updated = FileNodes.update(node.id, { content });
-  res.json({ success: true, node: updated });
+  const allEntries = listAllFs(sandboxId);
+  const entry = allEntries.find((e) => e.path === filePath);
+  const node = entry ? fsEntryToNode(sandboxId, entry) : null;
+
+  res.json({ success: true, node });
 });
 
 router.post('/', authMiddleware, (req: AuthenticatedRequest, res: Response): void => {
-  if (!verifySandboxAccess(req, res)) return;
+  const access = checkSandboxAccess(req, res);
+  if (!access) return;
+  if (!requireEditPermission(access, res)) return;
 
-  const sandboxId = Number(req.params.id);
+  const { sandboxId } = access;
   const { path: parentPath, name, type } = req.body;
 
   if (!parentPath || !name || !type) {
@@ -102,58 +117,53 @@ router.post('/', authMiddleware, (req: AuthenticatedRequest, res: Response): voi
   }
 
   const fullPath = parentPath === '/' ? `/${name}` : `${parentPath}/${name}`;
-
-  const existing = FileNodes.findBySandboxIdAndPath(sandboxId, fullPath);
-  if (existing) {
+  const allEntries = listAllFs(sandboxId);
+  if (allEntries.find((e) => e.path === fullPath)) {
     res.status(409).json({ success: false, error: 'Path already exists' });
     return;
   }
 
-  const node = FileNodes.create({
-    sandbox_id: sandboxId,
-    path: fullPath,
-    name,
-    type: type as 'file' | 'directory',
-    content: type === 'file' ? '' : null,
-  });
+  const ok = createFileFs(sandboxId, fullPath, type as 'file' | 'directory');
+  if (!ok) {
+    res.status(500).json({ success: false, error: 'Failed to create' });
+    return;
+  }
+
+  const updated = listAllFs(sandboxId);
+  const entry = updated.find((e) => e.path === fullPath);
+  const node = entry ? fsEntryToNode(sandboxId, entry) : null;
 
   res.status(201).json({ success: true, node });
 });
 
-router.post('/mkdir', authMiddleware, (req: AuthenticatedRequest, res: Response): void => {
-  if (!verifySandboxAccess(req, res)) return;
+router.post('/rename', authMiddleware, (req: AuthenticatedRequest, res: Response): void => {
+  const access = checkSandboxAccess(req, res);
+  if (!access) return;
+  if (!requireEditPermission(access, res)) return;
 
-  const sandboxId = Number(req.params.id);
-  const { path: parentPath, name } = req.body;
+  const { sandboxId } = access;
+  const { oldPath, newPath } = req.body;
 
-  if (!parentPath || !name) {
-    res.status(400).json({ success: false, error: 'path and name are required' });
+  if (!oldPath || !newPath) {
+    res.status(400).json({ success: false, error: 'oldPath and newPath are required' });
     return;
   }
 
-  const dirPath = parentPath === '/' ? `/${name}` : `${parentPath}/${name}`;
-
-  const existing = FileNodes.findBySandboxIdAndPath(sandboxId, dirPath);
-  if (existing) {
-    res.status(409).json({ success: false, error: 'Path already exists' });
+  const ok = renameInFs(sandboxId, oldPath, newPath);
+  if (!ok) {
+    res.status(500).json({ success: false, error: 'Failed to rename' });
     return;
   }
 
-  const node = FileNodes.create({
-    sandbox_id: sandboxId,
-    path: dirPath,
-    name,
-    type: 'directory',
-    content: null,
-  });
-
-  res.status(201).json({ success: true, node });
+  res.json({ success: true });
 });
 
 router.delete('/', authMiddleware, (req: AuthenticatedRequest, res: Response): void => {
-  if (!verifySandboxAccess(req, res)) return;
+  const access = checkSandboxAccess(req, res);
+  if (!access) return;
+  if (!requireEditPermission(access, res)) return;
 
-  const sandboxId = Number(req.params.id);
+  const { sandboxId } = access;
   const filePath = req.query.path as string;
 
   if (!filePath || filePath === '/') {
@@ -161,9 +171,9 @@ router.delete('/', authMiddleware, (req: AuthenticatedRequest, res: Response): v
     return;
   }
 
-  const deleted = FileNodes.deleteByPath(sandboxId, filePath);
-  if (!deleted) {
-    res.status(404).json({ success: false, error: 'Path not found' });
+  const ok = deleteFromFs(sandboxId, filePath);
+  if (!ok) {
+    res.status(500).json({ success: false, error: 'Failed to delete' });
     return;
   }
 
@@ -171,9 +181,11 @@ router.delete('/', authMiddleware, (req: AuthenticatedRequest, res: Response): v
 });
 
 router.post('/snapshots', authMiddleware, (req: AuthenticatedRequest, res: Response): void => {
-  if (!verifySandboxAccess(req, res)) return;
+  const access = checkSandboxAccess(req, res);
+  if (!access) return;
+  if (!requireEditPermission(access, res)) return;
 
-  const sandboxId = Number(req.params.id);
+  const { sandboxId } = access;
   const { label } = req.body;
 
   if (!label) {
@@ -181,8 +193,15 @@ router.post('/snapshots', authMiddleware, (req: AuthenticatedRequest, res: Respo
     return;
   }
 
-  const snapshot = createSnapshot(sandboxId, label);
-  if (!snapshot) {
+  const snapshot = Snapshots.create({
+    sandbox_id: sandboxId,
+    label,
+    tree_hash: '',
+  });
+
+  const ok = createSnapshotFs(sandboxId, snapshot.id);
+  if (!ok) {
+    Snapshots.delete(snapshot.id);
     res.status(500).json({ success: false, error: 'Failed to create snapshot' });
     return;
   }
@@ -191,25 +210,55 @@ router.post('/snapshots', authMiddleware, (req: AuthenticatedRequest, res: Respo
 });
 
 router.post('/snapshots/:sid/rollback', authMiddleware, (req: AuthenticatedRequest, res: Response): void => {
-  if (!verifySandboxAccess(req, res)) return;
+  const access = checkSandboxAccess(req, res);
+  if (!access) return;
+  if (!requireEditPermission(access, res)) return;
 
-  const sandboxId = Number(req.params.id);
+  const { sandboxId } = access;
   const snapshotId = Number(req.params.sid);
 
-  const success = rollbackToSnapshot(sandboxId, snapshotId);
-  if (!success) {
-    res.status(400).json({ success: false, error: 'Failed to rollback to snapshot' });
+  const snapshot = Snapshots.findById(snapshotId);
+  if (!snapshot) {
+    res.status(404).json({ success: false, error: 'Snapshot not found' });
+    return;
+  }
+
+  if (snapshot.sandbox_id !== sandboxId) {
+    res.status(400).json({ success: false, error: 'Snapshot does not belong to this sandbox' });
+    return;
+  }
+
+  const ok = rollbackFromSnapshotFs(sandboxId, snapshotId);
+  if (!ok) {
+    res.status(500).json({ success: false, error: 'Failed to rollback to snapshot' });
     return;
   }
 
   res.json({ success: true });
 });
 
-router.get('/snapshots', authMiddleware, (req: AuthenticatedRequest, res: Response): void => {
-  if (!verifySandboxAccess(req, res)) return;
+router.delete('/snapshots/:sid', authMiddleware, (req: AuthenticatedRequest, res: Response): void => {
+  const access = checkSandboxAccess(req, res);
+  if (!access) return;
+  if (!requireEditPermission(access, res)) return;
 
-  const sandboxId = Number(req.params.id);
-  const snapshots = listSnapshots(sandboxId);
+  const snapshotId = Number(req.params.sid);
+  const snapshot = Snapshots.findById(snapshotId);
+
+  if (snapshot) {
+    deleteSnapshotFs(snapshotId);
+    Snapshots.delete(snapshotId);
+  }
+
+  res.json({ success: true });
+});
+
+router.get('/snapshots', authMiddleware, (req: AuthenticatedRequest, res: Response): void => {
+  const access = checkSandboxAccess(req, res);
+  if (!access) return;
+
+  const { sandboxId } = access;
+  const snapshots = Snapshots.findBySandboxId(sandboxId);
 
   res.json({ success: true, snapshots });
 });

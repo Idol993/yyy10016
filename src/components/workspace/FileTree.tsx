@@ -2,6 +2,7 @@ import { useState, useMemo } from 'react'
 import { File, Folder, FolderOpen, Plus, Trash2, RefreshCw, ChevronRight, ChevronDown } from 'lucide-react'
 import { useFileStore } from '@/stores/files'
 import { useSandboxStore } from '@/stores/sandbox'
+import { useSandbox } from '@/contexts/SandboxContext'
 import type { FileNode } from '@/types'
 
 interface TreeNode {
@@ -87,9 +88,10 @@ interface TreeItemProps {
   onFileClick: (file: FileNode) => void
   onDelete: (path: string) => void
   currentPath: string | null
+  isReadOnly: boolean
 }
 
-function TreeItem({ node, depth, expandedDirs, toggleDir, onFileClick, onDelete, currentPath }: TreeItemProps) {
+function TreeItem({ node, depth, expandedDirs, toggleDir, onFileClick, onDelete, currentPath, isReadOnly }: TreeItemProps) {
   const isExpanded = expandedDirs.has(node.path)
   const isActive = currentPath === node.path && node.type === 'file'
 
@@ -103,7 +105,7 @@ function TreeItem({ node, depth, expandedDirs, toggleDir, onFileClick, onDelete,
 
   const handleDelete = (e: React.MouseEvent) => {
     e.stopPropagation()
-    onDelete(node.path)
+    if (!isReadOnly) onDelete(node.path)
   }
 
   return (
@@ -133,13 +135,15 @@ function TreeItem({ node, depth, expandedDirs, toggleDir, onFileClick, onDelete,
           <File size={16} className="shrink-0" style={{ color: getFileColor(node.name) }} />
         )}
         <span className="truncate flex-1">{node.name}</span>
-        <button
-          onClick={handleDelete}
-          className="p-0.5 rounded opacity-0 group-hover:opacity-100 hover:bg-[#30363D] text-[#8B949E] hover:text-[#F85149] transition-all"
-          title="Delete"
-        >
-          <Trash2 size={12} />
-        </button>
+        {!isReadOnly && (
+          <button
+            onClick={handleDelete}
+            className="p-0.5 rounded opacity-0 group-hover:opacity-100 hover:bg-[#30363D] text-[#8B949E] hover:text-[#F85149] transition-all"
+            title="Delete"
+          >
+            <Trash2 size={12} />
+          </button>
+        )}
       </div>
       {node.type === 'directory' && isExpanded && node.children && (
         <div className="relative">
@@ -157,6 +161,7 @@ function TreeItem({ node, depth, expandedDirs, toggleDir, onFileClick, onDelete,
               onFileClick={onFileClick}
               onDelete={onDelete}
               currentPath={currentPath}
+              isReadOnly={isReadOnly}
             />
           ))}
         </div>
@@ -168,6 +173,8 @@ function TreeItem({ node, depth, expandedDirs, toggleDir, onFileClick, onDelete,
 export default function FileTree() {
   const { files, currentFile, fetchFiles, addOpenFile, setCurrentFile, createFile, deleteFile } = useFileStore()
   const { currentSandbox } = useSandboxStore()
+  const { permission } = useSandbox()
+  const isReadOnly = permission === 'read'
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set(['/src']))
   const [showNewFile, setShowNewFile] = useState(false)
   const [showNewDir, setShowNewDir] = useState(false)
@@ -203,7 +210,7 @@ export default function FileTree() {
   }
 
   const handleCreateFile = async () => {
-    if (!currentSandbox || !newName.trim()) return
+    if (!currentSandbox || !newName.trim() || isReadOnly) return
     await createFile(currentSandbox.id, '/', newName.trim(), 'file')
     await fetchFiles(currentSandbox.id)
     setNewName('')
@@ -211,7 +218,7 @@ export default function FileTree() {
   }
 
   const handleCreateDir = async () => {
-    if (!currentSandbox || !newName.trim()) return
+    if (!currentSandbox || !newName.trim() || isReadOnly) return
     await createFile(currentSandbox.id, '/', newName.trim(), 'directory')
     await fetchFiles(currentSandbox.id)
     setNewName('')
@@ -219,7 +226,7 @@ export default function FileTree() {
   }
 
   const handleDelete = async (path: string) => {
-    if (!currentSandbox) return
+    if (!currentSandbox || isReadOnly) return
     await deleteFile(currentSandbox.id, path)
   }
 
@@ -228,20 +235,24 @@ export default function FileTree() {
       <div className="flex items-center justify-between px-3 py-2 border-b border-[#30363D]">
         <span className="text-xs font-medium text-[#8B949E] uppercase tracking-wider">Explorer</span>
         <div className="flex items-center gap-0.5">
-          <button
-            onClick={() => { setShowNewFile(true); setShowNewDir(false); setNewName('') }}
-            className="p-1 rounded hover:bg-[#30363D] text-[#8B949E] hover:text-[#E6EDF3] transition-colors"
-            title="New File"
-          >
-            <Plus size={14} />
-          </button>
-          <button
-            onClick={() => { setShowNewDir(true); setShowNewFile(false); setNewName('') }}
-            className="p-1 rounded hover:bg-[#30363D] text-[#8B949E] hover:text-[#E6EDF3] transition-colors"
-            title="New Folder"
-          >
-            <Folder size={14} />
-          </button>
+          {!isReadOnly && (
+            <>
+              <button
+                onClick={() => { setShowNewFile(true); setShowNewDir(false); setNewName('') }}
+                className="p-1 rounded hover:bg-[#30363D] text-[#8B949E] hover:text-[#E6EDF3] transition-colors"
+                title="New File"
+              >
+                <Plus size={14} />
+              </button>
+              <button
+                onClick={() => { setShowNewDir(true); setShowNewFile(false); setNewName('') }}
+                className="p-1 rounded hover:bg-[#30363D] text-[#8B949E] hover:text-[#E6EDF3] transition-colors"
+                title="New Folder"
+              >
+                <Folder size={14} />
+              </button>
+            </>
+          )}
           <button
             onClick={handleRefresh}
             className="p-1 rounded hover:bg-[#30363D] text-[#8B949E] hover:text-[#E6EDF3] transition-colors"
@@ -297,6 +308,7 @@ export default function FileTree() {
             onFileClick={handleFileClick}
             onDelete={handleDelete}
             currentPath={currentFile?.path || null}
+            isReadOnly={isReadOnly}
           />
         ))}
       </div>

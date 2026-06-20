@@ -11,7 +11,8 @@ export default function Terminal() {
   const xtermRef = useRef<XTerminal | null>(null)
   const fitAddonRef = useRef<FitAddon | null>(null)
   const [activeTab, setActiveTab] = useState<TabType>('terminal')
-  const { terminalOutput, sendInput, isConnected } = useSandbox()
+  const { terminalOutput, sendInput, isConnected, permission } = useSandbox()
+  const isReadOnly = permission === 'read'
   const outputRef = useRef('')
 
   useEffect(() => {
@@ -44,11 +45,12 @@ export default function Terminal() {
       fontFamily: "'JetBrains Mono', monospace",
       fontSize: 13,
       lineHeight: 1.6,
-      cursorBlink: true,
-      cursorStyle: 'block',
+      cursorBlink: !isReadOnly,
+      cursorStyle: isReadOnly ? 'underline' : 'block',
       scrollback: 1000,
       convertEol: true,
       allowTransparency: true,
+      disableStdin: isReadOnly,
     })
 
     const fitAddon = new FitAddon()
@@ -66,7 +68,7 @@ export default function Terminal() {
     window.addEventListener('resize', handleResize)
 
     term.onData((data) => {
-      if (isConnected) {
+      if (isConnected && !isReadOnly) {
         sendInput(data)
       }
     })

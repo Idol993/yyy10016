@@ -32,7 +32,9 @@ export interface UseSandboxWSReturn {
   ydoc: Y.Doc | null
   isConnected: boolean
   terminalOutput: string
+  permission: 'read' | 'edit' | 'owner'
   sendExecute: (command: string, args?: string[]) => void
+  sendRun: () => void
   sendInput: (input: string) => void
   sendResize: (cols: number, rows: number) => void
   sendEdit: (update: Uint8Array) => void
@@ -59,6 +61,7 @@ export function useSandboxWS(sandboxId: number | null): UseSandboxWSReturn {
   const [terminalOutput, setTerminalOutput] = useState('')
   const [users, setUsers] = useState<CollabUser[]>([])
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([])
+  const [permission, setPermission] = useState<'read' | 'edit' | 'owner'>('edit')
   const token = useAuthStore((s) => s.token)
   const userId = useAuthStore((s) => s.user?.id)
   const username = useAuthStore((s) => s.user?.username)
@@ -201,21 +204,28 @@ export function useSandboxWS(sandboxId: number | null): UseSandboxWSReturn {
     send('execute', { command, args: args || [] })
   }, [send])
 
-  const sendInput = useCallback((input: string) => {
-    send('input', { data: input })
+  const sendRun = useCallback(() => {
+    send('run', {})
   }, [send])
+
+  const sendInput = useCallback((input: string) => {
+    if (permission === 'read') return
+    send('input', { data: input })
+  }, [send, permission])
 
   const sendResize = useCallback((cols: number, rows: number) => {
     send('resize', { cols, rows })
   }, [send])
 
   const sendEdit = useCallback((update: Uint8Array) => {
+    if (permission === 'read') return
     send('collab_edit', { update: Array.from(update) })
-  }, [send])
+  }, [send, permission])
 
   const sendCursor = useCallback((path: string, line: number, column: number) => {
+    if (permission === 'read') return
     send('cursor', { path, line, column })
-  }, [send])
+  }, [send, permission])
 
   const sendChat = useCallback((message: string) => {
     send('chat', { message })
@@ -225,17 +235,31 @@ export function useSandboxWS(sandboxId: number | null): UseSandboxWSReturn {
     if (userId && username) {
       const color = getUserColor(userId)
       setUsers((prev) => {
-        if (prev.find((u) => u.id === userId)) return prev
+        if (prev.find((u) => u.id === userId)) {
+          const me = prev.find((u) => u.id === userId)!
+          setPermission(me.permission)
+          return prev
+        }
+        setPermission('owner')
         return [{ id: userId, username, color, permission: 'owner' }, ...prev]
       })
     }
   }, [userId, username])
 
+  useEffect(() => {
+    const me = users.find((u) => u.id === userId)
+    if (me) {
+      setPermission(me.permission)
+    }
+  }, [users, userId])
+
   return {
     ydoc: ydocRef.current,
     isConnected,
     terminalOutput,
+    permission,
     sendExecute,
+    sendRun,
     sendInput,
     sendResize,
     sendEdit,

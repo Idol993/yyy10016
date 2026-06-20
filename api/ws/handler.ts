@@ -3,9 +3,8 @@ import type { WebSocket } from 'ws';
 import { WebSocketServer } from 'ws';
 import { URL } from 'url';
 import jwt from 'jsonwebtoken';
-import { spawn, type ChildProcess } from 'child_process';
 import { Sandboxes, Collaborations } from '../db/store.js';
-import { getActiveProcess, startSandbox } from '../services/sandbox.js';
+import type { JwtPayload } from '../types.js';
 import {
   getCollabRoom,
   addClientToRoom,
@@ -20,7 +19,16 @@ import {
   getRoomUsers,
   type CollabUser,
 } from '../services/collab.js';
-import type { JwtPayload } from '../types.js';
+import { setActiveProcess, startSandbox } from '../services/sandbox.js';
+import {
+  executeInSandbox,
+  runEntryFile,
+  runCustomCommand,
+  sendToProcess,
+  type ExecContext,
+  type ExecCallbacks,
+} from '../services/executor.js';
+import type { ChildProcess } from 'child_process';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'sandboxos-dev-secret';
 
@@ -45,97 +53,47 @@ function getSandboxProcess(sandboxId: number): SandboxProcesses {
   return sandboxProcesses.get(sandboxId)!;
 }
 
-function handleExecute(ws: WebSocket, sandboxId: number, payload: Record<string, unknown>): void {
-  const command = payload.command as string;
-  const args = (payload.args as string[]) || [];
-  const cwd = payload.cwd as string | undefined;
-
-  if (!command) {
-    ws.send(JSON.stringify({ type: 'output', payload: { stream: 'stderr', data: 'No command specified\n', timestamp: Date.now() } }));
-    return;
-  }
-
-  const sandbox = Sandboxes.findById(sandboxId);
-  if (!sandbox) return;
-
-  const fullCommand = args.length > 0 ? `${command} ${args.join(' ')}` : command;
-  const procInfo = getSandboxProcess(sandboxId);
-  const room = getCollabRoom(sandboxId);
-
-  try {
-    const child = spawn('cmd', ['/c', fullCommand], {
-      cwd: cwd || process.cwd(),
-      env: { ...process.env },
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-
-    procInfo.process = child;
-
-    child.stdout.on('data', (data: Buffer) => {
-      const msg = {
-        type: 'output',
-        payload: { stream: 'stdout', data: data.toString(), timestamp: Date.now() },
-      };
-      for (const client of room.clients.keys()) {
-        if (client.readyState === 1) {
-          client.send(JSON.stringify(msg));
-        }
-      }
-    });
-
-    child.stderr.on('data', (data: Buffer) => {
-      const msg = {
-        type: 'output',
-        payload: { stream: 'stderr', data: data.toString(), timestamp: Date.now() },
-      };
-      for (const client of room.clients.keys()) {
-        if (client.readyState === 1) {
-          client.send(JSON.stringify(msg));
-        }
-      }
-    });
-
-    child.on('close', (code) => {
-      const msg = {
-        type: 'output',
-        payload: { stream: 'stdout', data: `\nProcess exited with code ${code}\n`, timestamp: Date.now() },
-      };
-      for (const client of room.clients.keys()) {
-        if (client.readyState === 1) {
-          client.send(JSON.stringify(msg));
-        }
-      }
-      procInfo.process = null;
-    });
-
-    child.on('error', (err) => {
-      const msg = {
-        type: 'output',
-        payload: { stream: 'stderr', data: `Error: ${err.message}\n`, timestamp: Date.now() },
-      };
-      for (const client of room.clients.keys()) {
-        if (client.readyState === 1) {
-          client.send(JSON.stringify(msg));
-        }
-      }
-      procInfo.process = null;
-    });
-  } catch (err: unknown) {
-    const errorMsg = err instanceof Error ? err.message : String(err);
-    ws.send(JSON.stringify({ type: 'output', payload: { stream: 'stderr', data: `Failed to execute: ${errorMsg}\n`, timestamp: Date.now() } }));
+function sendToAll(room: ReturnType<typeof getCollabRoom>, msg: unknown): void {
+  for (const client of room.clients.keys()) {
+    if (client.readyState === 1) {
+      client.send(JSON.stringify(msg));
+    }
   }
 }
 
-function handleInput(sandboxId: number, payload: Record<string, unknown>): void {
-  const procInfo = getSandboxProcess(sandboxId);
-  if (procInfo.process && procInfo.process.stdin.writable) {
-    const data = payload.data as string;
-    procInfo.process.stdin.write(data);
-  }
+function buildExecContext(
+  sandboxId: number,
+  userId: number,
+  username: string,
+  permission: 'read' | 'edit' | 'owner'
+): ExecContext {
+  return { sandboxId, userId, username, permission };
 }
 
-function handleResize(_sandboxId: number, _payload: Record<string, unknown>): void {
-  // Terminal resize is handled client-side in xterm.js
+function createCallbacks(room: ReturnType<typeof getCollabRoom>): ExecCallbacks {
+  return {
+    onOutput: (stream, data) => {
+      const msg = {
+        type: 'output',
+        payload: { stream, data, timestamp: Date.now() },
+      };
+      sendToAll(room, msg);
+    },
+    onExit: (code) => {
+      const msg = {
+        type: 'output',
+        payload: { stream: 'system' as const, data: `\n[SandboxOS] Process exited with code ${code}\n`, timestamp: Date.now() },
+      };
+      sendToAll(room, msg);
+    },
+    onError: (err) => {
+      const msg = {
+        type: 'output',
+        payload: { stream: 'stderr' as const, data: `[SandboxOS] Error: ${err.message}\n`, timestamp: Date.now() },
+      };
+      sendToAll(room, msg);
+    },
+  };
 }
 
 export function setupWebSocket(server: Server): void {
@@ -171,16 +129,23 @@ export function setupWebSocket(server: Server): void {
     }
 
     const isOwner = sandbox.user_id === payload.userId;
-    const isCollab = !!Collaborations.findBySandboxIdAndUserId(sandboxId, payload.userId);
+    const collabEntry = Collaborations.findBySandboxIdAndUserId(sandboxId, payload.userId);
+    const isCollab = !!collabEntry;
     if (!isOwner && !isCollab) {
       ws.close(403, 'No access to this sandbox');
       return;
     }
 
-    const permission: 'edit' | 'read' | 'owner' = isOwner ? 'owner' : (Collaborations.findBySandboxIdAndUserId(sandboxId, payload.userId)?.permission || 'read');
+    const permission: 'edit' | 'read' | 'owner' = isOwner
+      ? 'owner'
+      : (collabEntry?.permission || 'read') as 'edit' | 'read';
+
+    startSandbox(sandboxId).catch(() => { /* ignore */ });
 
     const room = getCollabRoom(sandboxId);
     const user: CollabUser = addClientToRoom(sandboxId, ws, payload.userId, permission);
+    const procInfo = getSandboxProcess(sandboxId);
+    const execCtx = buildExecContext(sandboxId, payload.userId, payload.email || 'user', permission);
 
     const chatHistory = getChatHistory(room);
     if (chatHistory.length > 0) {
@@ -193,24 +158,91 @@ export function setupWebSocket(server: Server): void {
     }
 
     const users = getRoomUsers(sandboxId);
-    ws.send(JSON.stringify({ type: 'users', payload: { users } }));
+    sendToAll(room, { type: 'users', payload: { users } });
 
-    broadcastUserJoin(room, user, ws);
+    broadcastUserJoin(room, user);
+
+    ws.send(JSON.stringify({
+      type: 'output',
+      payload: {
+        stream: 'system',
+        data: `[SandboxOS] Connected. Your permission: ${permission}. Isolated environment ready.\n`,
+        timestamp: Date.now(),
+      },
+    }));
 
     ws.on('message', (data: Buffer) => {
       try {
         const message = JSON.parse(data.toString()) as { type: string; payload: Record<string, unknown> };
+
         switch (message.type) {
-          case 'execute':
-            handleExecute(ws, sandboxId, message.payload);
+          case 'execute': {
+            if (permission === 'read') {
+              ws.send(JSON.stringify({
+                type: 'output',
+                payload: { stream: 'stderr', data: '[SandboxOS] Read-only members cannot execute commands\n', timestamp: Date.now() },
+              }));
+              break;
+            }
+            const command = message.payload.command as string;
+            const args = (message.payload.args as string[]) || [];
+            const callbacks = createCallbacks(room);
+
+            if (command === '__run_entry__') {
+              const result = runEntryFile(execCtx, sandbox.language, callbacks);
+              if (result.error) {
+                callbacks.onOutput('stderr', `[SandboxOS] ${result.error}\n`);
+              } else if (result.process) {
+                procInfo.process = result.process;
+                setActiveProcess(sandboxId, result.process);
+              }
+            } else if (command) {
+              const result = runCustomCommand(execCtx, command, args, callbacks);
+              if (result.error) {
+                callbacks.onOutput('stderr', `[SandboxOS] ${result.error}\n`);
+              } else if (result.process) {
+                procInfo.process = result.process;
+                setActiveProcess(sandboxId, result.process);
+              }
+            }
             break;
-          case 'input':
-            handleInput(sandboxId, message.payload);
+          }
+          case 'run': {
+            if (permission === 'read') {
+              ws.send(JSON.stringify({
+                type: 'output',
+                payload: { stream: 'stderr', data: '[SandboxOS] Read-only members cannot execute code\n', timestamp: Date.now() },
+              }));
+              break;
+            }
+            const callbacks = createCallbacks(room);
+            const result = runEntryFile(execCtx, sandbox.language, callbacks);
+            if (result.error) {
+              callbacks.onOutput('stderr', `[SandboxOS] ${result.error}\n`);
+            } else if (result.process) {
+              procInfo.process = result.process;
+              setActiveProcess(sandboxId, result.process);
+            }
             break;
+          }
+          case 'input': {
+            if (permission === 'read') {
+              ws.send(JSON.stringify({
+                type: 'output',
+                payload: { stream: 'stderr', data: '[SandboxOS] Read-only members cannot send input\n', timestamp: Date.now() },
+              }));
+              break;
+            }
+            const inputData = message.payload.data as string;
+            sendToProcess(procInfo.process, inputData);
+            break;
+          }
           case 'resize':
-            handleResize(sandboxId, message.payload);
             break;
           case 'collab_edit': {
+            if (permission === 'read') {
+              break;
+            }
             const update = message.payload.update as number[];
             if (update) {
               const updateUint8 = new Uint8Array(update);
@@ -218,9 +250,13 @@ export function setupWebSocket(server: Server): void {
             }
             break;
           }
-          case 'cursor':
+          case 'cursor': {
+            if (permission === 'read') {
+              break;
+            }
             handleCursor(room, message.payload, payload.userId, ws);
             break;
+          }
           case 'chat': {
             const msgText = message.payload.message as string;
             handleChat(room, msgText, payload.userId, ws);
@@ -236,13 +272,16 @@ export function setupWebSocket(server: Server): void {
       broadcastUserLeave(room, payload.userId);
       removeClientFromRoom(sandboxId, ws);
 
-      const procInfo = sandboxProcesses.get(sandboxId);
-      if (room.clients.size === 0 && procInfo?.process) {
-        procInfo.process.kill();
-        procInfo.process = null;
+      const procInfoCached = sandboxProcesses.get(sandboxId);
+      if (room.clients.size === 0 && procInfoCached?.process) {
+        try {
+          procInfoCached.process.kill();
+        } catch { /* ignore */ }
+        procInfoCached.process = null;
       }
-    });
 
-    ws.send(JSON.stringify({ type: 'output', payload: { stream: 'stdout', data: `Connected to sandbox ${sandboxId}\n`, timestamp: Date.now() } }));
+      const usersAfter = getRoomUsers(sandboxId);
+      sendToAll(room, { type: 'users', payload: { users: usersAfter } });
+    });
   });
 }

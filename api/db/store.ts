@@ -276,6 +276,9 @@ export const Collaborations = {
   findBySandboxIdAndUserId(sandbox_id: number, user_id: number): Collaboration | undefined {
     return db.collaborations.find((c) => c.sandbox_id === sandbox_id && c.user_id === user_id);
   },
+  findByUserId(user_id: number): Collaboration[] {
+    return db.collaborations.filter((c) => c.user_id === user_id);
+  },
   create(data: Omit<Collaboration, 'id' | 'joined_at'>): Collaboration {
     const collab: Collaboration = {
       id: nextId('collaborations'),

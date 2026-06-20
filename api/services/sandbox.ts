@@ -1,7 +1,8 @@
 import { spawn, type ChildProcess } from 'child_process';
 import { v4 as uuidv4 } from 'uuid';
-import { Sandboxes, FileNodes } from '../db/store.js';
+import { Sandboxes } from '../db/store.js';
 import type { Sandbox, ResourceMetrics } from '../types.js';
+import { getSandboxFsPath, initSandboxFs, getSandboxDiskUsage } from './sandboxFs.js';
 
 interface ActiveSandbox {
   sandboxId: number;
@@ -10,6 +11,8 @@ interface ActiveSandbox {
   language: string;
   startedAt: string;
   metrics: ResourceMetrics;
+  cpuStartUsage: number;
+  memoryLimitBytes: number;
 }
 
 const activeSandboxes = new Map<number, ActiveSandbox>();
@@ -17,11 +20,18 @@ const activeSandboxes = new Map<number, ActiveSandbox>();
 const POOL_SIZE = 2;
 const pool: string[] = [];
 
-const LANGUAGE_EXECUTORS: Record<string, { cmd: string; args: string[] }> = {
-  python: { cmd: 'python', args: ['-i'] },
-  nodejs: { cmd: 'node', args: ['--interactive'] },
-  cpp: { cmd: 'bash', args: [] },
-  rust: { cmd: 'bash', args: [] },
+const LANGUAGE_ENTRY_FILES: Record<string, string> = {
+  python: '/src/main.py',
+  nodejs: '/src/index.js',
+  cpp: '/src/main.cpp',
+  rust: '/src/main.rs',
+};
+
+const LANGUAGE_DEFAULT_CONTENT: Record<string, string> = {
+  python: 'print("Hello from SandboxOS!")\n',
+  nodejs: 'console.log("Hello from SandboxOS!");\n',
+  cpp: '#include <iostream>\nint main() {\n  std::cout << "Hello from SandboxOS!" << std::endl;\n  return 0;\n}\n',
+  rust: 'fn main() {\n  println!("Hello from SandboxOS!");\n}\n',
 };
 
 export function prewarmPool(): void {
@@ -37,6 +47,20 @@ function allocateVmId(): string {
   return uuidv4();
 }
 
+export function initDefaultFiles(sandboxId: number, language: string): void {
+  const defaultFiles: Array<{ path: string; content: string | null; type: 'file' | 'directory' }> = [
+    { path: '/', content: null, type: 'directory' },
+    { path: '/src', content: null, type: 'directory' },
+    { path: '/README.md', content: '# My Sandbox\n\nCreated with SandboxOS.\n', type: 'file' },
+  ];
+
+  const entryPath = LANGUAGE_ENTRY_FILES[language] || '/src/main.py';
+  const entryContent = LANGUAGE_DEFAULT_CONTENT[language] || 'print("Hello")\n';
+  defaultFiles.push({ path: entryPath, content: entryContent, type: 'file' });
+
+  initSandboxFs(sandboxId, defaultFiles);
+}
+
 export async function startSandbox(sandboxId: number): Promise<Sandbox | null> {
   const sandbox = Sandboxes.findById(sandboxId);
   if (!sandbox) return null;
@@ -46,37 +70,23 @@ export async function startSandbox(sandboxId: number): Promise<Sandbox | null> {
   Sandboxes.update(sandboxId, { status: 'starting', last_active_at: new Date().toISOString() });
 
   const vmId = allocateVmId();
-  const executor = LANGUAGE_EXECUTORS[sandbox.language] || LANGUAGE_EXECUTORS.nodejs;
+  const fsPath = getSandboxFsPath(sandboxId);
+  const memoryLimitBytes = sandbox.memory_limit_mb * 1024 * 1024;
 
   try {
-    const childProcess = spawn(executor.cmd, executor.args, {
-      env: { ...process.env, SANDBOX_ID: String(sandboxId), VM_ID: vmId },
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-
     const active: ActiveSandbox = {
       sandboxId,
       vmId,
-      process: childProcess,
+      process: null,
       language: sandbox.language,
       startedAt: new Date().toISOString(),
       metrics: { cpu_percent: 0, memory_used_mb: 0, disk_used_mb: 0 },
+      cpuStartUsage: Date.now(),
+      memoryLimitBytes,
     };
 
     activeSandboxes.set(sandboxId, active);
-
-    childProcess.on('error', () => {
-      Sandboxes.update(sandboxId, { status: 'error', vm_id: null });
-      activeSandboxes.delete(sandboxId);
-    });
-
-    childProcess.on('exit', () => {
-      const current = Sandboxes.findById(sandboxId);
-      if (current && current.status !== 'stopped') {
-        Sandboxes.update(sandboxId, { status: 'stopped', vm_id: null });
-      }
-      activeSandboxes.delete(sandboxId);
-    });
+    void fsPath;
 
     const updated = Sandboxes.update(sandboxId, {
       status: 'running',
@@ -109,7 +119,7 @@ export async function stopSandbox(sandboxId: number): Promise<Sandbox | null> {
         }
       }, 5000);
     } catch {
-      // process already dead
+      // already dead
     }
   }
 
@@ -130,9 +140,11 @@ export function getSandboxStatus(sandboxId: number): { status: string; metrics: 
 
   const active = activeSandboxes.get(sandboxId);
   if (active && sandbox.status === 'running') {
-    const cpuPercent = Math.random() * 15;
-    const memUsed = 32 + Math.random() * 64;
-    const diskUsed = 10 + Math.random() * 20;
+    const cpuPercent = Math.min(sandbox.cpu_limit_percent, Math.random() * (sandbox.cpu_limit_percent * 0.8));
+    const memUsed = Math.min(sandbox.memory_limit_mb, 32 + Math.random() * (sandbox.memory_limit_mb * 0.6));
+    const diskBytes = getSandboxDiskUsage(sandboxId);
+    const diskUsed = Math.min(sandbox.disk_limit_mb, diskBytes / (1024 * 1024));
+
     active.metrics = {
       cpu_percent: Math.round(cpuPercent * 100) / 100,
       memory_used_mb: Math.round(memUsed * 100) / 100,
@@ -152,64 +164,33 @@ export function getActiveProcess(sandboxId: number): ChildProcess | null {
   return active?.process ?? null;
 }
 
-export function initDefaultFiles(sandboxId: number, language: string): void {
-  const now = new Date().toISOString();
-  const rootDir = FileNodes.create({
-    sandbox_id: sandboxId,
-    path: '/',
-    name: '/',
-    type: 'directory',
-    content: null,
-  });
-
-  FileNodes.create({
-    sandbox_id: sandboxId,
-    path: '/src',
-    name: 'src',
-    type: 'directory',
-    content: null,
-  });
-
-  let entryPath = '/src/index.js';
-  let entryContent = 'console.log("Hello from SandboxOS!");\n';
-
-  switch (language) {
-    case 'python':
-      entryPath = '/src/main.py';
-      entryContent = 'print("Hello from SandboxOS!")\n';
-      break;
-    case 'nodejs':
-      entryPath = '/src/index.js';
-      entryContent = 'console.log("Hello from SandboxOS!");\n';
-      break;
-    case 'cpp':
-      entryPath = '/src/main.cpp';
-      entryContent = '#include <iostream>\nint main() {\n  std::cout << "Hello from SandboxOS!" << std::endl;\n  return 0;\n}\n';
-      break;
-    case 'rust':
-      entryPath = '/src/main.rs';
-      entryContent = 'fn main() {\n  println!("Hello from SandboxOS!");\n}\n';
-      break;
+export function setActiveProcess(sandboxId: number, proc: ChildProcess | null): void {
+  const active = activeSandboxes.get(sandboxId);
+  if (active) {
+    active.process = proc;
   }
-
-  FileNodes.create({
-    sandbox_id: sandboxId,
-    path: entryPath,
-    name: pathBasename(entryPath),
-    type: 'file',
-    content: entryContent,
-  });
-
-  FileNodes.create({
-    sandbox_id: sandboxId,
-    path: '/README.md',
-    name: 'README.md',
-    type: 'file',
-    content: '# My Sandbox\n\nCreated with SandboxOS.\n',
-  });
 }
 
-function pathBasename(p: string): string {
-  const parts = p.split('/');
-  return parts[parts.length - 1] || '';
+export function getSandboxMemoryLimit(sandboxId: number): number {
+  const sandbox = Sandboxes.findById(sandboxId);
+  return sandbox ? sandbox.memory_limit_mb * 1024 * 1024 : 256 * 1024 * 1024;
+}
+
+export function getSandboxCpuLimit(sandboxId: number): number {
+  const sandbox = Sandboxes.findById(sandboxId);
+  return sandbox ? sandbox.cpu_limit_percent : 50;
+}
+
+export function getSandboxDiskLimit(sandboxId: number): number {
+  const sandbox = Sandboxes.findById(sandboxId);
+  return sandbox ? sandbox.disk_limit_mb * 1024 * 1024 : 500 * 1024 * 1024;
+}
+
+export function checkSandboxDiskUsage(sandboxId: number): { ok: boolean; usedMb: number; limitMb: number } {
+  const sandbox = Sandboxes.findById(sandboxId);
+  if (!sandbox) return { ok: false, usedMb: 0, limitMb: 0 };
+  const usedBytes = getSandboxDiskUsage(sandboxId);
+  const usedMb = usedBytes / (1024 * 1024);
+  const limitMb = sandbox.disk_limit_mb;
+  return { ok: usedMb < limitMb, usedMb: Math.round(usedMb * 100) / 100, limitMb };
 }

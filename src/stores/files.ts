@@ -80,6 +80,10 @@ export const useFileStore = create<FileState>()((set, get) => ({
 
   rollbackSnapshot: async (sandboxId: number, snapshotId: number) => {
     await apiPost<ApiResponse>(`/sandboxes/${sandboxId}/files/snapshots/${snapshotId}/rollback`)
+    await get().fetchFiles(sandboxId)
+    if (get().currentFile) {
+      await get().fetchFileContent(sandboxId, get().currentFile!.path)
+    }
   },
 
   setCurrentFile: (file: FileNode | null) => {

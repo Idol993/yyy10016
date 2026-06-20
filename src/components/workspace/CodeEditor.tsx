@@ -50,7 +50,8 @@ export default function CodeEditor() {
   const { openFiles, currentFile, setCurrentFile, removeOpenFile, saveFile } = useFileStore()
   const { currentSandbox } = useSandboxStore()
   const { user } = useAuthStore()
-  const { ydoc, users, sendEdit, sendCursor, isConnected } = useSandbox()
+  const { ydoc, users, sendEdit, sendCursor, isConnected, permission } = useSandbox()
+  const isReadOnly = permission === 'read'
 
   const [cursorPosition, setCursorPosition] = useState({ line: 1, column: 1 })
   const [remoteCursors, setRemoteCursors] = useState<RemoteCursor[]>([])
@@ -216,21 +217,21 @@ export default function CodeEditor() {
   }
 
   const handleSave = useCallback(async () => {
-    if (!currentSandbox || !currentFile) return
+    if (!currentSandbox || !currentFile || isReadOnly) return
     const content = editorRef.current?.getValue() || currentFile.content || ''
     await saveFile(currentSandbox.id, currentFile.path, content)
-  }, [currentSandbox, currentFile, saveFile])
+  }, [currentSandbox, currentFile, saveFile, isReadOnly])
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 's') {
         e.preventDefault()
-        handleSave()
+        if (!isReadOnly) handleSave()
       }
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [handleSave])
+  }, [handleSave, isReadOnly])
 
   const language = currentFile ? getMonacoLanguage(currentFile.name) : 'plaintext'
   const languageName = currentFile ? getLanguageName(currentFile.name) : ''
@@ -306,6 +307,9 @@ export default function CodeEditor() {
                 tabSize: 2,
                 wordWrap: 'on',
                 padding: { top: 8, bottom: 8 },
+                readOnly: isReadOnly,
+                domReadOnly: isReadOnly,
+                renderValidationDecorations: 'on',
               }}
             />
             <div className="pointer-events-none absolute inset-0 overflow-hidden">

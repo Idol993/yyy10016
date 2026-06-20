@@ -1,12 +1,24 @@
 import { Router, type Response } from 'express';
-import { Sandboxes, Users } from '../db/store.js';
+import { Sandboxes, Users, Collaborations } from '../db/store.js';
 import { authMiddleware, type AuthenticatedRequest } from '../middleware/auth.js';
+import { checkSandboxAccess, requireEditPermission, requireOwnerPermission } from '../middleware/permissions.js';
 import { startSandbox, stopSandbox, getSandboxStatus, initDefaultFiles } from '../services/sandbox.js';
 
 const router = Router();
 
 router.get('/', authMiddleware, (req: AuthenticatedRequest, res: Response): void => {
-  const sandboxes = Sandboxes.findByUserId(req.user!.userId);
+  const ownedSandboxes = Sandboxes.findByUserId(req.user!.userId);
+  const collaborations = Collaborations.findByUserId(req.user!.userId);
+  const collabSandboxIds = new Set(collaborations.map((c) => c.sandbox_id));
+  const collabSandboxes = collabSandboxIds.size > 0
+    ? Sandboxes.findAll().filter((s) => collabSandboxIds.has(s.id))
+    : [];
+
+  const uniqueMap = new Map<number, typeof ownedSandboxes[0]>();
+  for (const s of ownedSandboxes) uniqueMap.set(s.id, s);
+  for (const s of collabSandboxes) uniqueMap.set(s.id, s);
+
+  const sandboxes = Array.from(uniqueMap.values());
   res.json({ success: true, sandboxes });
 });
 
@@ -53,72 +65,50 @@ router.post('/', authMiddleware, (req: AuthenticatedRequest, res: Response): voi
 });
 
 router.post('/:id/start', authMiddleware, async (req: AuthenticatedRequest, res: Response): Promise<void> => {
-  const sandbox = Sandboxes.findById(Number(req.params.id));
-  if (!sandbox) {
-    res.status(404).json({ success: false, error: 'Sandbox not found' });
-    return;
-  }
+  const access = checkSandboxAccess(req, res);
+  if (!access) return;
+  if (!requireEditPermission(access, res)) return;
 
-  if (sandbox.user_id !== req.user!.userId) {
-    res.status(403).json({ success: false, error: 'Not your sandbox' });
-    return;
-  }
+  const { sandboxId } = access;
 
-  const updated = await startSandbox(sandbox.id);
+  const updated = await startSandbox(sandboxId);
   if (!updated) {
     res.status(500).json({ success: false, error: 'Failed to start sandbox' });
     return;
   }
 
-  const wsUrl = `ws://localhost:${process.env.PORT || 3001}/ws/sandbox/${sandbox.id}`;
-  res.json({ success: true, sandbox: updated, wsUrl });
+  res.json({ success: true, sandbox: updated });
 });
 
 router.post('/:id/stop', authMiddleware, async (req: AuthenticatedRequest, res: Response): Promise<void> => {
-  const sandbox = Sandboxes.findById(Number(req.params.id));
-  if (!sandbox) {
-    res.status(404).json({ success: false, error: 'Sandbox not found' });
-    return;
-  }
+  const access = checkSandboxAccess(req, res);
+  if (!access) return;
+  if (!requireEditPermission(access, res)) return;
 
-  if (sandbox.user_id !== req.user!.userId) {
-    res.status(403).json({ success: false, error: 'Not your sandbox' });
-    return;
-  }
+  const { sandboxId } = access;
 
-  const updated = await stopSandbox(sandbox.id);
+  const updated = await stopSandbox(sandboxId);
   res.json({ success: true, sandbox: updated });
 });
 
 router.delete('/:id', authMiddleware, (req: AuthenticatedRequest, res: Response): void => {
-  const sandbox = Sandboxes.findById(Number(req.params.id));
-  if (!sandbox) {
-    res.status(404).json({ success: false, error: 'Sandbox not found' });
-    return;
-  }
+  const access = checkSandboxAccess(req, res);
+  if (!access) return;
+  if (!requireOwnerPermission(access, res)) return;
 
-  if (sandbox.user_id !== req.user!.userId) {
-    res.status(403).json({ success: false, error: 'Not your sandbox' });
-    return;
-  }
+  const { sandboxId } = access;
 
-  Sandboxes.delete(sandbox.id);
+  Sandboxes.delete(sandboxId);
   res.json({ success: true });
 });
 
 router.get('/:id/status', authMiddleware, (req: AuthenticatedRequest, res: Response): void => {
-  const sandbox = Sandboxes.findById(Number(req.params.id));
-  if (!sandbox) {
-    res.status(404).json({ success: false, error: 'Sandbox not found' });
-    return;
-  }
+  const access = checkSandboxAccess(req, res);
+  if (!access) return;
 
-  if (sandbox.user_id !== req.user!.userId) {
-    res.status(403).json({ success: false, error: 'Not your sandbox' });
-    return;
-  }
+  const { sandboxId } = access;
 
-  const status = getSandboxStatus(sandbox.id);
+  const status = getSandboxStatus(sandboxId);
   if (!status) {
     res.status(404).json({ success: false, error: 'Sandbox status not available' });
     return;

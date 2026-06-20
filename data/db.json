@@ -4,132 +4,54 @@
       "id": 1,
       "email": "demo@sandboxos.io",
       "username": "demo",
-      "password_hash": "$2a$10$ONQaOaJ0Ntu05e2X1sf4uOzVbp7oF4hRm.5VUrTqZ9JooMGmJxcdy",
+      "password_hash": "$2a$10$HZln.ymzmTocO5/CkJWATuZCE2PquxUSG7VrO.JFG6PfG/tcPsBpi",
       "role": "user",
       "storage_limit_mb": 500,
       "sandbox_limit": 3,
-      "created_at": "2026-06-20T00:33:33.029Z"
+      "created_at": "2026-06-20T01:48:53.986Z"
     },
     {
       "id": 2,
-      "email": "test2@test.com",
-      "username": "testuser2",
-      "password_hash": "$2a$10$k4wqAAhqmaENB.JmsZrupOkN8I.63uucSOOm1WA4JofPGTKNv46wm",
+      "email": "test@test.com",
+      "username": "testuser",
+      "password_hash": "$2a$10$iaaBlLRAO9rN5bUcPzTVg./HTQRbcnYcFf05ZtjUlaIDMr.L3pkmi",
       "role": "user",
       "storage_limit_mb": 500,
       "sandbox_limit": 3,
-      "created_at": "2026-06-20T00:58:08.434Z"
+      "created_at": "2026-06-20T01:49:07.461Z"
     }
   ],
   "sandboxes": [
     {
       "id": 1,
-      "user_id": 1,
-      "name": "Test Sandbox",
-      "language": "python",
-      "status": "stopped",
-      "vm_id": null,
-      "cpu_limit_percent": 50,
-      "memory_limit_mb": 256,
-      "disk_limit_mb": 500,
-      "created_at": "2026-06-20T00:35:59.594Z",
-      "last_active_at": "2026-06-20T00:35:59.594Z"
-    },
-    {
-      "id": 2,
       "user_id": 2,
-      "name": "Test Sandbox",
+      "name": "Test Python",
       "language": "python",
       "status": "stopped",
       "vm_id": null,
       "cpu_limit_percent": 50,
       "memory_limit_mb": 256,
       "disk_limit_mb": 500,
-      "created_at": "2026-06-20T00:58:19.475Z",
-      "last_active_at": "2026-06-20T00:58:19.475Z"
+      "created_at": "2026-06-20T01:49:23.576Z",
+      "last_active_at": "2026-06-20T01:49:23.576Z"
     }
   ],
-  "file_nodes": [
+  "file_nodes": [],
+  "snapshots": [
     {
       "id": 1,
       "sandbox_id": 1,
-      "path": "/",
-      "name": "/",
-      "type": "directory",
-      "content": null,
-      "modified_at": "2026-06-20T00:35:59.596Z"
-    },
-    {
-      "id": 2,
-      "sandbox_id": 1,
-      "path": "/src",
-      "name": "src",
-      "type": "directory",
-      "content": null,
-      "modified_at": "2026-06-20T00:35:59.597Z"
-    },
-    {
-      "id": 3,
-      "sandbox_id": 1,
-      "path": "/src/main.py",
-      "name": "main.py",
-      "type": "file",
-      "content": "print(\"Hello from SandboxOS!\")\n",
-      "modified_at": "2026-06-20T00:35:59.597Z"
-    },
-    {
-      "id": 4,
-      "sandbox_id": 1,
-      "path": "/README.md",
-      "name": "README.md",
-      "type": "file",
-      "content": "# My Sandbox\n\nCreated with SandboxOS.\n",
-      "modified_at": "2026-06-20T00:35:59.598Z"
-    },
-    {
-      "id": 5,
-      "sandbox_id": 2,
-      "path": "/",
-      "name": "/",
-      "type": "directory",
-      "content": null,
-      "modified_at": "2026-06-20T00:58:19.476Z"
-    },
-    {
-      "id": 6,
-      "sandbox_id": 2,
-      "path": "/src",
-      "name": "src",
-      "type": "directory",
-      "content": null,
-      "modified_at": "2026-06-20T00:58:19.476Z"
-    },
-    {
-      "id": 7,
-      "sandbox_id": 2,
-      "path": "/src/main.py",
-      "name": "main.py",
-      "type": "file",
-      "content": "print(\"Hello from SandboxOS!\")\n",
-      "modified_at": "2026-06-20T00:58:19.477Z"
-    },
-    {
-      "id": 8,
-      "sandbox_id": 2,
-      "path": "/README.md",
-      "name": "README.md",
-      "type": "file",
-      "content": "# My Sandbox\n\nCreated with SandboxOS.\n",
-      "modified_at": "2026-06-20T00:58:19.477Z"
+      "label": "Initial snapshot",
+      "tree_hash": "",
+      "created_at": "2026-06-20T01:50:25.076Z"
     }
   ],
-  "snapshots": [],
   "collaborations": [],
   "_counters": {
     "users": 2,
-    "sandboxes": 2,
-    "file_nodes": 8,
-    "snapshots": 0,
+    "sandboxes": 1,
+    "file_nodes": 0,
+    "snapshots": 1,
     "collaborations": 0
   }
 }

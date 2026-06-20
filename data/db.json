@@ -4,7 +4,7 @@
       "id": 1,
       "email": "demo@sandboxos.io",
       "username": "demo",
-      "password_hash": "$2a$10$ytqnnh3qj3/Qi22rwubkSOIuLNiEePoh5h5qIxJZ/bGYKZgD25obq",
+      "password_hash": "$2a$10$0iLgzrFvH0YAQElYfVdCVe5F0MBQpNm.Q34NBx.ZPGEeHlU4H2mHa",
       "role": "user",
       "storage_limit_mb": 500,
       "sandbox_limit": 3,

@@ -25,7 +25,7 @@ import {
   killRunningSandbox,
   getRunningInstance,
   writeToRunningInstance,
-  RUNTIME_INFO,
+  getRuntimeMeta,
   type ExecContext,
   type ExecCallbacks,
 } from '../services/executor.js';
@@ -158,17 +158,32 @@ export function setupWebSocket(server: Server): void {
 
     broadcastUserJoin(room, user);
 
-    const runningInstance = getRunningInstance(sandboxId);
-
-    ws.send(JSON.stringify({
-      type: 'output',
-      payload: {
-        stream: 'system',
-        data: `[SandboxOS] Connected. Runtime: ${RUNTIME_INFO.type} v${RUNTIME_INFO.version}. Permission: ${permission}. ` +
-          (runningInstance ? `Active instance: ${runningInstance.id}` : `Sandbox ready. Click Run to start isolated instance.`) + '\n',
-        timestamp: Date.now(),
-      },
-    }));
+    (async () => {
+      try {
+        const rt = await getRuntimeMeta();
+        const runningInstance = getRunningInstance(sandboxId);
+        ws.send(JSON.stringify({
+          type: 'output',
+          payload: {
+            stream: 'system',
+            data: `[SandboxOS] Connected. Runtime: ${rt.type} v${rt.version}. Permission: ${permission}. ` +
+              (runningInstance ? `Active instance: ${runningInstance.id}` : `Sandbox ready. Click Run to start isolated instance.`) + '\n',
+            timestamp: Date.now(),
+          },
+        }));
+      } catch {
+        const runningInstance = getRunningInstance(sandboxId);
+        ws.send(JSON.stringify({
+          type: 'output',
+          payload: {
+            stream: 'system',
+            data: `[SandboxOS] Connected. Permission: ${permission}. ` +
+              (runningInstance ? `Active instance: ${runningInstance.id}` : `Sandbox ready. Click Run to start isolated instance.`) + '\n',
+            timestamp: Date.now(),
+          },
+        }));
+      }
+    })();
 
     ws.on('message', (data: Buffer) => {
       try {

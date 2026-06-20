@@ -22,13 +22,93 @@ function ensureDir(dir: string): void {
 ensureDir(RUNTIME_DIR);
 ensureDir(INSTANCES_DIR);
 
-export const RUNTIME_INFO = {
-  type: 'sandboxos-shim',
-  name: 'SandboxOS Runtime Shim',
-  version: '1.0.0',
-  isolation: 'Windows Job Object + CoW Filesystem + SOCKS Proxy Network Filter',
-  description: 'Lightweight container runtime providing process isolation, resource limits, and network filtering',
-};
+export type RuntimeType = 'gvisor' | 'firecracker' | 'windows-job' | 'none';
+
+export interface RuntimeInfo {
+  type: RuntimeType;
+  name: string;
+  version: string;
+  isolation: string;
+  available: boolean;
+  error?: string;
+}
+
+let detectedRuntime: RuntimeInfo | null = null;
+
+async function detectRuntime(): Promise<RuntimeInfo> {
+  if (detectedRuntime) return detectedRuntime;
+
+  if (os.platform() === 'linux') {
+    try {
+      const runscCheck = await new Promise<{ ok: boolean; version?: string }>((resolve) => {
+        exec('runsc --version 2>&1', { timeout: 2000, windowsHide: true }, (err, stdout) => {
+          if (!err && stdout.trim().length > 0) {
+            resolve({ ok: true, version: stdout.trim().split('\n')[0] });
+          } else {
+            resolve({ ok: false });
+          }
+        });
+      });
+      if (runscCheck.ok && runscCheck.version) {
+        detectedRuntime = {
+          type: 'gvisor',
+          name: 'gVisor (runsc)',
+          version: runscCheck.version,
+          isolation: 'gVisor Sentry + Platform System Call Interception',
+          available: true,
+        };
+        return detectedRuntime;
+      }
+    } catch { /* ignore */ }
+
+    try {
+      const fcCheck = await new Promise<{ ok: boolean; version?: string }>((resolve) => {
+        exec('firecracker --version 2>&1', { timeout: 2000, windowsHide: true }, (err, stdout) => {
+          if (!err && stdout.trim().length > 0) {
+            resolve({ ok: true, version: stdout.trim().split('\n')[0] });
+          } else {
+            resolve({ ok: false });
+          }
+        });
+      });
+      if (fcCheck.ok && fcCheck.version) {
+        detectedRuntime = {
+          type: 'firecracker',
+          name: 'Firecracker MicroVM',
+          version: fcCheck.version,
+          isolation: 'Hardware-assisted Virtualization (KVM)',
+          available: true,
+        };
+        return detectedRuntime;
+      }
+    } catch { /* ignore */ }
+  }
+
+  if (os.platform() === 'win32') {
+    detectedRuntime = {
+      type: 'windows-job',
+      name: 'Windows Job Object',
+      version: os.release(),
+      isolation: 'Windows Job Object + Process Tree Termination + CoW Filesystem',
+      available: true,
+    };
+    return detectedRuntime;
+  }
+
+  detectedRuntime = {
+    type: 'none',
+    name: 'None',
+    version: '0.0.0',
+    isolation: 'No isolation runtime available',
+    available: false,
+    error: 'No supported container runtime found. Install gVisor (runsc) on Linux, or enable Windows Job Object support.',
+  };
+  return detectedRuntime;
+}
+
+export async function getRuntimeInfo(): Promise<RuntimeInfo> {
+  return await detectRuntime();
+}
 
 export type InstanceStatus = 'created' | 'starting' | 'running' | 'paused' | 'stopping' | 'stopped' | 'killed';
 export type KillReason = 'cpu' | 'memory' | 'disk' | 'timeout' | 'user' | 'network' | 'error';
@@ -38,6 +118,7 @@ export interface SandboxInstance {
   sandboxId: number;
   pid: number | null;
   language: string;
+  runtimeType: RuntimeType;
   status: InstanceStatus;
   rootFs: string;
   jobObjectId: string;
@@ -82,10 +163,30 @@ class RuntimeShim extends EventEmitter {
   private monitorTimer: ReturnType<typeof setInterval> | null = null;
   private sandboxToInstance = new Map<number, string>();
   private cpuOverCount = new Map<string, number>();
+  private runtimeInfo: RuntimeInfo | null = null;
+  private initialized = false;
 
   constructor() {
     super();
+  }
+
+  async init(): Promise<RuntimeInfo> {
+    if (this.initialized) return this.runtimeInfo!;
+    this.runtimeInfo = await detectRuntime();
+    this.initialized = true;
     this.startMonitor();
+    return this.runtimeInfo;
+  }
+
+  getRuntime(): RuntimeInfo {
+    return this.runtimeInfo || {
+      type: 'none',
+      name: 'Not initialized',
+      version: '0.0.0',
+      isolation: 'Runtime not initialized',
+      available: false,
+      error: 'RuntimeShim not initialized',
+    };
   }
 
   private startMonitor(): void {
@@ -120,8 +221,7 @@ class RuntimeShim extends EventEmitter {
     return iid ? this.instances.get(iid) : undefined;
   }
 
-  private buildRootFs(fsPath: string): string {
-    const instanceId = this.generateInstanceId();
+  private buildRootFs(fsPath: string, instanceId: string): string {
     const rootFs = path.join(INSTANCES_DIR, instanceId, 'rootfs');
     ensureDir(rootFs);
 
@@ -160,6 +260,21 @@ class RuntimeShim extends EventEmitter {
     sourceFsPath: string;
     config: InstanceConfig;
   }): Promise<SandboxInstance> {
+    if (!this.initialized) await this.init();
+
+    const rt = this.runtimeInfo!;
+    if (!rt.available) {
+      throw new Error(
+        `[Runtime Error] No supported container runtime available.\n` +
+        `  Detected: ${rt.name} ${rt.version}\n` +
+        `  Error: ${rt.error || 'Runtime not available'}\n` +
+        `\n` +
+        `  gVisor and Firecracker are Linux-only technologies.\n` +
+        `  On Windows, this platform uses Windows Job Object isolation (native Windows feature).\n` +
+        `  If you need true gVisor/Firecracker isolation, run this platform on a Linux host.`
+      );
+    }
+
     const { sandboxId, language, sourceFsPath, config } = params;
 
     const existing = this.getInstanceBySandbox(sandboxId);
@@ -169,13 +284,14 @@ class RuntimeShim extends EventEmitter {
 
     const id = this.generateInstanceId();
     const jobObjectId = this.generateJobObjectId();
-    const rootFs = this.buildRootFs(sourceFsPath);
+    const rootFs = this.buildRootFs(sourceFsPath, id);
 
     const instance: SandboxInstance = {
       id,
       sandboxId,
       pid: null,
       language,
+      runtimeType: rt.type,
       status: 'created',
       rootFs,
       jobObjectId,
@@ -199,10 +315,81 @@ class RuntimeShim extends EventEmitter {
 
     this.instances.set(id, instance);
     this.sandboxToInstance.set(sandboxId, id);
-    this.addEvent(id, 'created', { rootFs, jobObjectId, language });
+    this.addEvent(id, 'created', { rootFs, jobObjectId, language, runtimeType: rt.type });
     this.emit('instance:created', instance);
 
     return instance;
+  }
+
+  private async buildGVisorCommand(
+    inst: SandboxInstance,
+    command: string,
+    args: string[],
+    env: NodeJS.ProcessEnv
+  ): Promise<{ cmd: string; args: string[]; env: NodeJS.ProcessEnv }> {
+    const envPairs: string[] = [];
+    for (const [k, v] of Object.entries(env)) {
+      if (v !== undefined) envPairs.push(`${k}=${v}`);
+    }
+
+    const runscArgs = [
+      '--root', path.join(RUNTIME_DIR, 'gvisor', inst.id),
+      '--debug',
+      'do',
+      '--rootfs', inst.rootFs,
+      '--cwd', '/',
+      '--user', 'nobody',
+      ...envPairs.map((e) => `--env=${e}`),
+      '--',
+      command,
+      ...args,
+    ];
+
+    return { cmd: 'runsc', args: runscArgs, env };
+  }
+
+  private async buildFirecrackerCommand(
+    inst: SandboxInstance,
+    command: string,
+    args: string[],
+    env: NodeJS.ProcessEnv
+  ): Promise<{ cmd: string; args: string[]; env: NodeJS.ProcessEnv }> {
+    const config: Record<string, unknown> = {
+      'boot-source': {
+        kernel_image_path: path.join(RUNTIME_DIR, 'firecracker', 'vmlinux.bin'),
+        boot_args: 'console=ttyS0 noapic reboot=k panic=1 pci=off',
+      },
+      drives: [{
+        drive_id: 'rootfs',
+        path_on_host: path.join(RUNTIME_DIR, 'firecracker', 'rootfs.ext4'),
+        is_root_device: true,
+        is_read_only: false,
+      }],
+      machine_config: {
+        vcpu_count: 1,
+        mem_size_mib: Math.max(128, Math.ceil(inst.config.memoryLimitBytes / 1024 / 1024)),
+        track_dirty_pages: false,
+      },
+      network_interfaces: [],
+    };
+
+    const configPath = path.join(INSTANCES_DIR, inst.id, 'firecracker-config.json');
+    fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+
+    return {
+      cmd: 'firecracker',
+      args: ['--no-api', '--config-file', configPath],
+      env,
+    };
+  }
+
+  private async buildWindowsJobCommand(
+    inst: SandboxInstance,
+    command: string,
+    args: string[],
+    env: NodeJS.ProcessEnv
+  ): Promise<{ cmd: string; args: string[]; env: NodeJS.ProcessEnv }> {
+    return { cmd: command, args, env };
   }
 
   async startInstance(
@@ -216,19 +403,38 @@ class RuntimeShim extends EventEmitter {
       onError: (err: Error) => void;
     }
   ): Promise<SandboxInstance> {
+    if (!this.initialized) await this.init();
+
     const inst = this.instances.get(instanceId);
     if (!inst) throw new Error(`Instance ${instanceId} not found`);
     if (inst.status === 'running') return inst;
 
+    const rt = this.runtimeInfo!;
+    if (!rt.available) {
+      throw new Error(rt.error || 'Runtime not available');
+    }
+
     inst.status = 'starting';
     inst.startedAt = Date.now();
-    this.addEvent(instanceId, 'starting', { command, args });
+    this.addEvent(instanceId, 'starting', { command, args, runtime: rt.type });
     this.emit('instance:starting', inst);
 
+    let execCmd: string;
+    let execArgs: string[];
+    let execEnv: NodeJS.ProcessEnv;
+
     try {
-      const proc = spawn(command, args, {
+      if (rt.type === 'gvisor') {
+        ({ cmd: execCmd, args: execArgs, env: execEnv } = await this.buildGVisorCommand(inst, command, args, env));
+      } else if (rt.type === 'firecracker') {
+        ({ cmd: execCmd, args: execArgs, env: execEnv } = await this.buildFirecrackerCommand(inst, command, args, env));
+      } else {
+        ({ cmd: execCmd, args: execArgs, env: execEnv } = await this.buildWindowsJobCommand(inst, command, args, env));
+      }
+
+      const proc = spawn(execCmd, execArgs, {
         cwd: inst.rootFs,
-        env,
+        env: execEnv,
         stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true,
         windowsVerbatimArguments: false,
@@ -236,7 +442,7 @@ class RuntimeShim extends EventEmitter {
 
       inst.pid = proc.pid || null;
       inst.status = 'running';
-      this.addEvent(instanceId, 'running', { pid: proc.pid });
+      this.addEvent(instanceId, 'running', { pid: proc.pid, runtime: rt.type });
       this.emit('instance:running', inst);
 
       this.processes.set(instanceId, {

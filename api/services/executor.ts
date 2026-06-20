@@ -5,10 +5,10 @@ import { spawn, type ChildProcess } from 'child_process';
 import { getSandboxFsPath, getSandboxDiskUsage } from './sandboxFs.js';
 import {
   runtimeShim,
-  RUNTIME_INFO,
   type SandboxInstance,
   type KillReason,
   type InstanceConfig,
+  type RuntimeInfo,
 } from './runtimeShim.js';
 import { networkFilter, startNetworkProxy, type NetworkEvent } from './networkFilter.js';
 
@@ -48,6 +48,16 @@ export interface RunCodeResult {
 
 let proxyStarted = false;
 let proxyPort = 0;
+let runtimeInitialized = false;
+let runtimeInfo: RuntimeInfo | null = null;
+
+async function ensureRuntime(): Promise<RuntimeInfo> {
+  if (!runtimeInitialized) {
+    runtimeInfo = await runtimeShim.init();
+    runtimeInitialized = true;
+  }
+  return runtimeInfo!;
+}
 
 async function ensureProxy(): Promise<number> {
   if (!proxyStarted) {
@@ -81,10 +91,16 @@ function buildCommand(language: string, rootFs: string): { cmd: string; args: st
   }
 }
 
-function buildSafeEnv(rootFs: string, proxyPort: number): NodeJS.ProcessEnv {
+function buildSafeEnv(
+  rootFs: string,
+  proxyPort: number,
+  runtimeType: string
+): NodeJS.ProcessEnv {
+  const proxyUrl = `socks5://127.0.0.1:${proxyPort}`;
+
   const env: NodeJS.ProcessEnv = {
     SANDBOX_MODE: '1',
-    SANDBOX_RUNTIME: RUNTIME_INFO.type,
+    SANDBOX_RUNTIME: runtimeType,
     SANDBOX_ROOT: rootFs,
     TMPDIR: path.join(rootFs, 'tmp'),
     TEMP: path.join(rootFs, 'tmp'),
@@ -102,7 +118,6 @@ function buildSafeEnv(rootFs: string, proxyPort: number): NodeJS.ProcessEnv {
     if (process.env[k]) env[k] = process.env[k];
   }
 
-  const proxyUrl = `socks5://127.0.0.1:${proxyPort}`;
   env['http_proxy'] = proxyUrl;
   env['https_proxy'] = proxyUrl;
   env['HTTP_PROXY'] = proxyUrl;
@@ -113,13 +128,38 @@ function buildSafeEnv(rootFs: string, proxyPort: number): NodeJS.ProcessEnv {
   env['SOCKS_PROXY'] = proxyUrl;
   env['no_proxy'] = '';
   env['NO_PROXY'] = '';
+
   env['GLOBAL_AGENT_HTTP_PROXY'] = proxyUrl;
   env['GLOBAL_AGENT_HTTPS_PROXY'] = proxyUrl;
 
-  env['NODE_OPTIONS'] = `--require ${path.resolve(path.dirname(new URL(import.meta.url).pathname.substring(1)), 'wrappers', 'node_socks.js')}`;
-  if (os.platform() === 'win32') {
-    const p = path.resolve(path.dirname(new URL(import.meta.url).pathname.substring(1)), 'wrappers', 'node_socks.js');
-    env['NODE_OPTIONS'] = `--require ${p}`;
+  env['PYTHONPROXYS'] = proxyUrl;
+  env['PIP_PROXY'] = proxyUrl;
+  env['PIP_INDEX_URL'] = 'https://pypi.org/simple/';
+  env['PIP_TRUSTED_HOST'] = 'pypi.org files.pythonhosted.org';
+  env['REQUESTS_PROXIES'] = `{"http": "${proxyUrl}", "https": "${proxyUrl}"}`;
+  env['URLLIB_PROXY'] = proxyUrl;
+
+  env['CARGO_HTTP_PROXY'] = proxyUrl;
+  env['CARGO_HTTPS_PROXY'] = proxyUrl;
+  env['RUSTUP_DIST_SERVER'] = 'https://static.rust-lang.org';
+  env['RUSTUP_UPDATE_ROOT'] = 'https://static.rust-lang.org/rustup';
+
+  env['http_proxy'] = proxyUrl;
+  env['HTTP_PROXY'] = proxyUrl;
+  env['https_proxy'] = proxyUrl;
+  env['HTTPS_PROXY'] = proxyUrl;
+  env['ftp_proxy'] = proxyUrl;
+  env['FTP_PROXY'] = proxyUrl;
+
+  try {
+    const wrapperPath = path.resolve(path.dirname(new URL(import.meta.url).pathname.substring(1)), 'wrappers', 'node_socks.js');
+    const winWrapperPath = wrapperPath.replace(/^\//, '');
+    env['NODE_OPTIONS'] = `--require ${os.platform() === 'win32' ? winWrapperPath : wrapperPath}`;
+    env['SANDBOX_NETWORK_WHITELIST'] = NETWORK_WHITELIST.join(',');
+    env['SOCKS_PROXY_HOST'] = '127.0.0.1';
+    env['SOCKS_PROXY_PORT'] = String(proxyPort);
+  } catch {
+    // ignore
   }
 
   return env;
@@ -129,6 +169,7 @@ async function compileIfNeeded(
   language: string,
   rootFs: string,
   proxyPort: number,
+  runtimeType: string,
   callbacks: ExecCallbacks
 ): Promise<{ success: boolean; error?: string }> {
   if (language !== 'cpp' && language !== 'rust') return { success: true };
@@ -164,7 +205,7 @@ async function compileIfNeeded(
       args = ['-C', 'opt-level=2', '-o', outFile, srcFile];
     }
 
-    const env = buildSafeEnv(rootFs, proxyPort);
+    const env = buildSafeEnv(rootFs, proxyPort, runtimeType);
     const proc = spawn(cmd, args, {
       cwd: rootFs,
       env,
@@ -199,14 +240,40 @@ export async function runEntryFile(
   }
 
   try {
+    const rt = await ensureRuntime();
     const port = await ensureProxy();
 
+    if (!rt.available) {
+      callbacks.onOutput('system', '='.repeat(60) + '\n');
+      callbacks.onOutput('system', '  [ERROR] Runtime Not Available\n');
+      callbacks.onOutput('system', '='.repeat(60) + '\n');
+      callbacks.onOutput('system', `  Detected: ${rt.name} ${rt.version}\n`);
+      callbacks.onOutput('system', `  Available: ${rt.available}\n`);
+      if (rt.error) {
+        callbacks.onOutput('system', `  Error: ${rt.error}\n`);
+      }
+      callbacks.onOutput('system', '\n');
+      callbacks.onOutput('system', '  gVisor and Firecracker are Linux-only technologies.\n');
+      callbacks.onOutput('system', '  On Windows, this platform uses Windows Job Object isolation.\n');
+      callbacks.onOutput('system', '  For true gVisor/Firecracker isolation, run on a Linux host.\n');
+      callbacks.onOutput('system', '='.repeat(60) + '\n');
+      return { error: rt.error || 'Runtime not available' };
+    }
+
     callbacks.onOutput('system', '='.repeat(60) + '\n');
-    callbacks.onOutput('system', `  ${RUNTIME_INFO.name} v${RUNTIME_INFO.version}\n`);
-    callbacks.onOutput('system', `  Runtime Type: ${RUNTIME_INFO.type}\n`);
-    callbacks.onOutput('system', `  Isolation: ${RUNTIME_INFO.isolation}\n`);
+    callbacks.onOutput('system', `  ${rt.name}\n`);
+    callbacks.onOutput('system', `  Version: ${rt.version}\n`);
+    callbacks.onOutput('system', `  Runtime Type: ${rt.type}\n`);
+    callbacks.onOutput('system', `  Isolation: ${rt.isolation}\n`);
     callbacks.onOutput('system', `  Network Proxy: socks5://127.0.0.1:${port}\n`);
     callbacks.onOutput('system', '='.repeat(60) + '\n');
+
+    if (rt.type !== 'gvisor' && rt.type !== 'firecracker') {
+      callbacks.onOutput('system', `[Warning] Not running in gVisor/Firecracker. ` +
+        `Using ${rt.name} (native Windows isolation).\n`);
+      callbacks.onOutput('system', `[Warning] For true gVisor/Firecracker isolation, ` +
+        `deploy to a Linux host with runsc or firecracker installed.\n`);
+    }
 
     const config: InstanceConfig = {
       cpuLimitPercent: ctx.cpuLimitPercent,
@@ -225,6 +292,7 @@ export async function runEntryFile(
     });
 
     callbacks.onOutput('system', `[Runtime] Instance ID: ${instance.id}\n`);
+    callbacks.onOutput('system', `[Runtime] Runtime: ${rt.type}\n`);
     callbacks.onOutput('system', `[Runtime] Job Object: ${instance.jobObjectId}\n`);
     callbacks.onOutput('system', `[Runtime] Root FS: ${instance.rootFs}\n`);
     callbacks.onOutput('system', `[Runtime] Language: ${ctx.language}\n`);
@@ -232,7 +300,7 @@ export async function runEntryFile(
     callbacks.onOutput('system', `[Runtime] Network Whitelist: ${NETWORK_WHITELIST.join(', ')}\n`);
 
     const { cmd, args, entry } = buildCommand(ctx.language, instance.rootFs);
-    const env = buildSafeEnv(instance.rootFs, port);
+    const env = buildSafeEnv(instance.rootFs, port, rt.type);
 
     if ((ctx.language === 'python' || ctx.language === 'nodejs') && entry && !fs.existsSync(entry)) {
       callbacks.onOutput('stderr', `[Runtime] Entry file not found: ${entry}\n`);
@@ -242,7 +310,7 @@ export async function runEntryFile(
 
     if (ctx.language === 'cpp' || ctx.language === 'rust') {
       callbacks.onOutput('system', `[Runtime] Compiling ${ctx.language.toUpperCase()} source...\n`);
-      const compileRes = await compileIfNeeded(ctx.language, instance.rootFs, port, callbacks);
+      const compileRes = await compileIfNeeded(ctx.language, instance.rootFs, port, rt.type, callbacks);
       if (!compileRes.success) {
         callbacks.onOutput('stderr', `[Runtime] ${compileRes.error || 'Compilation failed'}. Execution stopped.\n`);
         await runtimeShim.stopInstance(instance.id, 'error');
@@ -317,4 +385,6 @@ export function isNetworkAllowed(host: string): { allowed: boolean; reason?: str
   return networkFilter.isHostAllowed(host);
 }
 
-export { RUNTIME_INFO };
+export async function getRuntimeMeta(): Promise<RuntimeInfo> {
+  return await ensureRuntime();
+}
